@@ -1,9 +1,9 @@
 {
-  "trained_at": "2026-10-01T13:32:20+00:00",
-  "n_rows": 4,
+  "trained_at": "2026-10-01T16:21:05+00:00",
+  "n_rows": 6,
   "time_range": {
     "start": "2026-10-01T10:00:00+00:00",
-    "end": "2026-10-01T13:00:00+00:00"
+    "end": "2026-10-01T15:00:00+00:00"
   },
   "features": [
     "total_intensity_veh_per_hr",
@@ -11,40 +11,40 @@
   ],
   "target": "no2_ug_m3",
   "coefficients": {
-    "total_intensity_veh_per_hr": -0.007127929953677023,
-    "hour_of_day": -0.7025507502022911
+    "total_intensity_veh_per_hr": -0.0033414205096306392,
+    "hour_of_day": -0.34203947788046296
   },
-  "intercept": 58.09075711537628,
+  "intercept": 38.99189904304252,
   "metrics": {
-    "r2_in_sample": 0.9743996634574612,
-    "mae_in_sample": 0.36882171725920365,
+    "r2_in_sample": 0.7098402964461146,
+    "mae_in_sample": 1.028475727985354,
     "mae_leave_one_out": null
   },
-  "evaluation_note": "Only 4 row(s): no train/test split and no cross-validation; R2 and MAE are IN-SAMPLE (measured on the rows the model was fitted on) and overstate accuracy.",
-  "sign_check": "UNEXPECTED sign: more traffic lowers predicted NO2 (-7.13 ug/m3 per +1000 veh/h). Likely too little data or confounding (wind, boundary layer height, time of day), not a real effect.",
+  "evaluation_note": "Only 6 row(s): no train/test split and no cross-validation; R2 and MAE are IN-SAMPLE (measured on the rows the model was fitted on) and overstate accuracy.",
+  "sign_check": "UNEXPECTED sign: more traffic lowers predicted NO2 (-3.34 ug/m3 per +1000 veh/h). Likely too little data or confounding (wind, boundary layer height, time of day), not a real effect.",
   "sklearn_version": "1.7.2",
   "risk_comparison": {
     "threshold_ug_m3": 40.0,
     "n_exceeded": 0,
     "logistic": {
       "fitted": false,
-      "skip_reason": "too few rows: 4 < 10",
+      "skip_reason": "too few rows: 6 < 10",
       "file": null,
       "coefficients_log_odds": null,
       "intercept_log_odds": null
     },
     "in_sample": {
       "regression_sigmoid": {
-        "brier_in_sample": 0.0007,
+        "brier_in_sample": 0.0005,
         "brier_leave_one_out": null,
         "exceedances_caught": 0,
         "false_alarms": 0,
-        "min": 0.0086,
-        "max": 0.0327
+        "min": 0.0103,
+        "max": 0.0289
       },
       "logistic": null
     },
-    "comparison_note": "0 of 4 training hour(s) exceed 40 ug/m3. The sigmoid on the regression's predicted NO2 gives 0.01 to 0.03 (in-sample Brier 0.001); at >= 0.5 it raises 0 false alarm(s). The logistic model was not fitted (too few rows: 4 < 10). A logistic model learns only from the yes/no label, so it needs both outcomes and enough rows before it can place a boundary. The sigmoid on the regression is the more trustworthy score here: it uses every measured NO2 value rather than a yes/no label, rises smoothly with predicted NO2 (0.5 exactly where the prediction reaches 40 ug/m3) and is explained by the regression's coefficients. It is still a score, not a calibrated probability: its steepness (0.2 per ug/m3) is chosen, not fitted, and it is only as good as a regression on 4 hour(s).",
+    "comparison_note": "0 of 6 training hour(s) exceed 40 ug/m3. The sigmoid on the regression's predicted NO2 gives 0.01 to 0.03 (in-sample Brier 0.001); at >= 0.5 it raises 0 false alarm(s). The logistic model was not fitted (too few rows: 6 < 10). A logistic model learns only from the yes/no label, so it needs both outcomes and enough rows before it can place a boundary. The sigmoid on the regression is the more trustworthy score here: it uses every measured NO2 value rather than a yes/no label, rises smoothly with predicted NO2 (0.5 exactly where the prediction reaches 40 ug/m3) and is explained by the regression's coefficients. It is still a score, not a calibrated probability: its steepness (0.2 per ug/m3) is chosen, not fitted, and it is only as good as a regression on 6 hour(s).",
     "rows": [
       {
         "timestamp": "2026-10-01T10:00:00+00:00",
@@ -52,8 +52,8 @@
         "exceeded": false,
         "total_intensity_veh_per_hr": 3829.1,
         "hour_of_day": 11,
-        "no2_ug_m3_predicted": 23.07,
-        "regression_sigmoid_risk": 0.0327,
+        "no2_ug_m3_predicted": 22.43,
+        "regression_sigmoid_risk": 0.0289,
         "logistic_probability": null
       },
       {
@@ -62,8 +62,8 @@
         "exceeded": false,
         "total_intensity_veh_per_hr": 3832.5,
         "hour_of_day": 12,
-        "no2_ug_m3_predicted": 22.34,
-        "regression_sigmoid_risk": 0.0284,
+        "no2_ug_m3_predicted": 22.08,
+        "regression_sigmoid_risk": 0.027,
         "logistic_probability": null
       },
       {
@@ -72,8 +72,8 @@
         "exceeded": false,
         "total_intensity_veh_per_hr": 3750.0,
         "hour_of_day": 13,
-        "no2_ug_m3_predicted": 22.23,
-        "regression_sigmoid_risk": 0.0278,
+        "no2_ug_m3_predicted": 22.02,
+        "regression_sigmoid_risk": 0.0267,
         "logistic_probability": null
       },
       {
@@ -82,8 +82,28 @@
         "exceeded": false,
         "total_intensity_veh_per_hr": 4490.0,
         "hour_of_day": 14,
-        "no2_ug_m3_predicted": 16.25,
-        "regression_sigmoid_risk": 0.0086,
+        "no2_ug_m3_predicted": 19.2,
+        "regression_sigmoid_risk": 0.0154,
+        "logistic_probability": null
+      },
+      {
+        "timestamp": "2026-10-01T14:00:00+00:00",
+        "no2_ug_m3": 18.2,
+        "exceeded": false,
+        "total_intensity_veh_per_hr": 5000.0,
+        "hour_of_day": 15,
+        "no2_ug_m3_predicted": 17.15,
+        "regression_sigmoid_risk": 0.0103,
+        "logistic_probability": null
+      },
+      {
+        "timestamp": "2026-10-01T15:00:00+00:00",
+        "no2_ug_m3": 18.41,
+        "exceeded": false,
+        "total_intensity_veh_per_hr": 4760.0,
+        "hour_of_day": 16,
+        "no2_ug_m3_predicted": 17.61,
+        "regression_sigmoid_risk": 0.0112,
         "logistic_probability": null
       }
     ]
