@@ -387,6 +387,17 @@ def history(hours: int = 24):
     no2 = [{"timestamp": _iso(ts), "value": value, "is_flagged": bool(flagged)}
            for ts, value, flagged in _query(HISTORY_NO2_SQL, (STATION, COMPONENT, since))]
     traffic = traffic_history(_query(HISTORY_TRAFFIC_SQL, (list(NDW_SITE_LABELS), since)))
+    failed, error = 0, None
+    for item in traffic:  # the model's prediction for each past hour, next to what was measured
+        try:
+            result = predict(item["total_intensity_veh_per_hr"], window_hour_of_day(item["window_end"]))
+            item["no2_ug_m3_predicted"] = result["no2_ug_m3_predicted"]
+            item["no2_exceedance_risk"] = result["no2_exceedance_risk"]
+        except Exception as exc:  # degrade like /site does: the measured hours are still served
+            item["no2_ug_m3_predicted"] = item["no2_exceedance_risk"] = None
+            failed, error = failed + 1, repr(exc)
+    if failed:
+        log_event(logging.ERROR, event="history_prediction_failed", hours=failed, error=error)
     return {"hours": hours, "since": _iso(since), "threshold_ug_m3": THRESHOLD,
             "no2": no2, "traffic": traffic}
 
@@ -404,11 +415,11 @@ PAGE = r"""<!doctype html>
 <title>AirBreda: NO2 and A27 traffic</title>
 <style>
 :root { color-scheme: light; --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink-2:#52514e; --muted:#6e6c66;
-  --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,0.10); --blue:#2a78d6; --blue-track:#cde2fb; --orange:#eb6834;
+  --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,0.10); --blue:#2a78d6; --blue-track:#cde2fb; --orange:#eb6834; --aqua:#1baf7a;
   --s1:#1c5cab; --s2:#2a78d6; --s3:#5598e7; --s4:#86b6ef; --good:#006300; --good-fill:#0ca30c; --warn-fill:#fab219;
   --critical:#d03b3b; --warn-bg:#fff4d6; --warn-ink:#5e4300; --err-bg:#fde6e6; --err-ink:#7f1717; --focus:#2a78d6; }
 @media (prefers-color-scheme: dark) { :root { color-scheme: dark; --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink-2:#c3c2b7;
-  --muted:#9a988f; --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,0.10); --blue:#3987e5; --blue-track:#184f95; --orange:#d95926;
+  --muted:#9a988f; --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,0.10); --blue:#3987e5; --blue-track:#184f95; --orange:#d95926; --aqua:#199e70;
   --s1:#2a78d6; --s2:#3987e5; --s3:#6da7ec; --s4:#9ec5f4; --good:#0ca30c; --warn-bg:#3a2f12; --warn-ink:#f3d58a; --err-bg:#3d1c1c; --err-ink:#f4b4b4; --focus:#6aa0ff; } }
 * { box-sizing:border-box; }
 body { margin:0; background:var(--page); color:var(--ink); font:16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
@@ -453,6 +464,8 @@ h2 { font-size:17px; margin:0; }
 .chart line.grid { stroke:var(--grid); stroke-width:1; } .chart line.base { stroke:var(--axis); stroke-width:1; }
 .chart line.ref { stroke:var(--ink-2); stroke-width:1; stroke-dasharray:0; opacity:0.7; }
 .chart .series { stroke:var(--blue); stroke-width:2; fill:none; stroke-linejoin:round; stroke-linecap:round; }
+.chart .series.pred { stroke:var(--aqua); stroke-dasharray:7 6; } .chart .dot.pred { fill:var(--aqua); }
+.legend i.dash { height:0; border-top:3px dashed var(--aqua); background:none; border-radius:0; }
 .chart .wash { fill:var(--blue); opacity:0.10; }
 .chart .dot { fill:var(--blue); stroke:var(--surface); stroke-width:2; } .chart .dot.flag { fill:var(--surface); stroke:var(--blue); }
 .chart .col { fill:var(--orange); } .chart .col.hot { opacity:0.75; }
@@ -519,14 +532,14 @@ tr:last-child td { border-bottom:none; } .num { text-align:right; }
 <section class="card" aria-label="Last 24 hours">
   <div class="card-head">
     <div><h2>Last 24 hours</h2><div class="meta">One point per hour. Hover or use the arrow keys for values.</div></div>
-    <div class="legend"><span><i style="background:var(--blue)"></i>NO<sub>2</sub> (&micro;g/m&sup3;)</span><span><i class="col" style="background:var(--orange)"></i>Total traffic (veh/h)</span></div>
+    <div class="legend"><span><i style="background:var(--blue)"></i>NO<sub>2</sub> (&micro;g/m&sup3;)</span><span><i class="dash"></i>Predicted NO<sub>2</sub> (model)</span><span><i class="col" style="background:var(--orange)"></i>Total traffic (veh/h)</span></div>
   </div>
   <div class="chart" id="chart" tabindex="0" aria-label="NO2 and traffic over the last 24 hours; the table below holds the same values">
     <div class="plot"><svg id="svg" viewBox="0 0 1000 420" role="img" aria-hidden="true"></svg></div>
     <div class="tip" id="tip"></div>
   </div>
   <details><summary>Show the 24 hours as a table</summary>
-    <div class="scroll"><table><thead><tr><th>Hour (local)</th><th class="num">NO<sub>2</sub> (&micro;g/m&sup3;)</th><th class="num">Total traffic (veh/h)</th></tr></thead><tbody id="hist-rows"></tbody></table></div>
+    <div class="scroll"><table><thead><tr><th>Hour (local)</th><th class="num">NO<sub>2</sub> (&micro;g/m&sup3;)</th><th class="num">Predicted NO<sub>2</sub></th><th class="num">Total traffic (veh/h)</th></tr></thead><tbody id="hist-rows"></tbody></table></div>
   </details>
 </section>
 
@@ -704,7 +717,8 @@ function renderHistory(hist) {
   (hist.traffic || []).forEach(p => chart.traffic.set(new Date(p.window_end).getTime(), p));
   const innerW = W - PAD.l - PAD.r, hourW = innerW / 24;
   const x = t => PAD.l + (t - start) / HOUR_MS * hourW - hourW / 2;      // the hour's midpoint
-  const no2Max = niceMax(Math.max(hist.threshold_ug_m3 || 40, ...[...chart.no2.values()].map(p => p.value || 0)) * 1.15);
+  const no2Max = niceMax(Math.max(hist.threshold_ug_m3 || 40, ...[...chart.no2.values()].map(p => p.value || 0),
+    ...[...chart.traffic.values()].map(p => p.no2_ug_m3_predicted || 0)) * 1.15);
   const trMax = niceMax(Math.max(1000, ...[...chart.traffic.values()].map(p => p.total_intensity_veh_per_hr || 0)) * 1.1);
   const yN = v => NO2_Y.top + NO2_Y.h - v / no2Max * NO2_Y.h;
   const yT = v => TR_Y.top + TR_Y.h - v / trMax * TR_Y.h;
@@ -736,6 +750,17 @@ function renderHistory(hist) {
   }
   pts.forEach(p => svg.appendChild(svgEl("circle", {cx: p[0], cy: p[1], r: 4, class: "dot" + (chart.no2.get(p[2]).is_flagged ? " flag" : "")})));
   if (pts.length) { const last = pts[pts.length - 1]; svg.appendChild(svgEl("text", {x: last[0] + 8, y: last[1] + 4, class: "lbl"}, num(chart.no2.get(last[2]).value, 1))); }
+  // The model's prediction for every past hour that had traffic: how well it tracks reality.
+  const ppts = chart.hours.filter(t => chart.traffic.has(t) && has(chart.traffic.get(t).no2_ug_m3_predicted))
+    .map(t => [x(t), yN(chart.traffic.get(t).no2_ug_m3_predicted), t]);
+  if (ppts.length > 1) svg.appendChild(svgEl("path", {d: ppts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" "), class: "series pred"}));
+  ppts.forEach(p => svg.appendChild(svgEl("circle", {cx: p[0], cy: p[1], r: 4, class: "dot pred"})));
+  if (ppts.length) {
+    const last = ppts[ppts.length - 1], lastM = pts.length ? pts[pts.length - 1] : null;
+    // keep the two end labels apart when the lines end close together
+    const ly = lastM && Math.abs(lastM[1] - last[1]) < 18 && Math.abs(lastM[0] - last[0]) < 80 ? last[1] + 22 : last[1] + 4;
+    svg.appendChild(svgEl("text", {x: last[0] + 8, y: ly, class: "lbl"}, num(chart.traffic.get(last[2]).no2_ug_m3_predicted, 1) + " predicted"));
+  }
   const colW = Math.min(24, hourW - 4);
   chart.hours.forEach(t => {
     const p = chart.traffic.get(t);
@@ -755,6 +780,7 @@ function renderHistory(hist) {
     const row = el("tr");
     row.appendChild(el("td", {}, windowText(new Date(t).toISOString())));
     row.appendChild(el("td", {class: "num"}, n ? num(n.value, 1) + (n.is_flagged ? " (flagged)" : "") : "n/a"));
+    row.appendChild(el("td", {class: "num"}, tr && has(tr.no2_ug_m3_predicted) ? num(tr.no2_ug_m3_predicted, 1) : "n/a"));
     row.appendChild(el("td", {class: "num"}, tr ? num(tr.total_intensity_veh_per_hr, 0) : "n/a"));
     rows.appendChild(row);
   });
@@ -784,6 +810,8 @@ function showIndex(i) {
   r1.appendChild(el("b", {}, n ? num(n.value, 1) + " \u00b5g/m\u00b3" + (n.is_flagged ? " (flagged)" : "") : "no reading")); tip.appendChild(r1);
   const r2 = el("div", {class: "row"}); r2.appendChild(el("span", {}, "")); r2.firstChild.appendChild(el("i", {style: "background:var(--orange)"})); r2.firstChild.appendChild(document.createTextNode("Traffic"));
   r2.appendChild(el("b", {}, tr ? num(tr.total_intensity_veh_per_hr, 0) + " veh/h" : "no full hour")); tip.appendChild(r2);
+  const r3 = el("div", {class: "row"}); r3.appendChild(el("span", {}, "")); r3.firstChild.appendChild(el("i", {class: "dash"})); r3.firstChild.appendChild(document.createTextNode("Predicted"));
+  r3.appendChild(el("b", {}, tr && has(tr.no2_ug_m3_predicted) ? num(tr.no2_ug_m3_predicted, 1) + " \u00b5g/m\u00b3" : "no prediction")); tip.appendChild(r3);
   // The svg can be wider than its scrolling wrapper on a phone, so measure the svg itself.
   const svgRect = $("svg").getBoundingClientRect(), boxRect = box.getBoundingClientRect(), scale = svgRect.width / W;
   const left = Math.min(Math.max(8, svgRect.left - boxRect.left + px * scale + 14), boxRect.width - tip.offsetWidth - 8);

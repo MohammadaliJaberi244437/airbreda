@@ -381,7 +381,22 @@ def test_history_joins_no2_and_hourly_traffic(client, monkeypatch):
     # The 13:00 hour has only 2 hrl samples, below MIN_SAMPLES, so it is left out.
     assert body["traffic"] == [{
         "window_end": "2026-10-01T12:00:00+00:00", "total_intensity_veh_per_hr": 2640.0,
-        "sites": {"hrl": 1200.0, "hrr": 900.0, "vwd": 300.0, "vwa": 240.0}, "min_samples": 6}]
+        "sites": {"hrl": 1200.0, "hrr": 900.0, "vwd": 300.0, "vwa": 240.0}, "min_samples": 6,
+        "no2_ug_m3_predicted": 30.0, "no2_exceedance_risk": 0.1192}]
+
+
+def test_history_keeps_the_measured_hours_when_the_model_fails(client, monkeypatch, caplog):
+    def broken(total, hour):
+        raise RuntimeError("model.pkl is corrupt")
+    monkeypatch.setattr(dashboard, "predict", broken)
+    monkeypatch.setattr(dashboard, "_query", lambda sql, params: [] if sql is dashboard.HISTORY_NO2_SQL
+                        else [(HOUR, site_id, 500.0, 6) for site_id in dashboard.NDW_SITE_IDS.values()])
+    with caplog.at_level(logging.ERROR):
+        body = client.get("/history").json()
+    [item] = body["traffic"]
+    assert item["total_intensity_veh_per_hr"] == 2000.0
+    assert item["no2_ug_m3_predicted"] is None and item["no2_exceedance_risk"] is None
+    assert len(_events(caplog, "history_prediction_failed")) == 1
 
 
 def test_history_clamps_the_hour_range(client, monkeypatch):
