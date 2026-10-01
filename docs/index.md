@@ -13,7 +13,7 @@ MohammadAli Jaberi, Breda University of Applied Sciences (BUas), 1 October 2026.
 
 AirBreda answers one question for the Municipality of Breda: how does A27 traffic relate to nitrogen dioxide (NO2) in Breda, and is the current hour likely to be a high-NO2 hour? It combines **Luchtmeetnet** hourly NO2 at station NL10240 (Breda-Tilburgseweg) with the **NDW** national traffic feed, from which I keep four A27 sites near hectometer 63: the two mainline carriageways (hrl, hrr) and the entry and exit slip roads (vwd, vwa).
 
-It runs on AWS in eu-north-1 (Stockholm): one EC2 t3.micro with two cron-started ingestion containers and an always-on dashboard, RDS PostgreSQL and an S3 bucket. Dashboard: [http://51.20.92.194:8000](http://51.20.92.194:8000). Code: [https://github.com/MohammadaliJaberi244437/airbreda](https://github.com/MohammadaliJaberi244437/airbreda).
+It runs on AWS in eu-north-1 (Stockholm): one EC2 t3.micro with two cron-started ingestion containers and an always-on dashboard, RDS PostgreSQL and an S3 bucket. Dashboard: [http://13.61.230.95:8000](http://13.61.230.95:8000). Code: [https://github.com/MohammadaliJaberi244437/airbreda](https://github.com/MohammadaliJaberi244437/airbreda).
 
 I did the five-day course in one day (1 October 2026). NDW capture started on my laptop at 10:33 local time, before any cloud resource existed; cloud ingestion has run since 11:23. With {{N_ROWS}} hourly rows the model is a placeholder that proves the serving path; the architecture is the deliverable.
 
@@ -150,14 +150,14 @@ flowchart LR
 
 - **A third container on the same VM**, built from `Dockerfile.dashboard` with `model.pkl` copied in: the VM is already paid for, the load is a few requests a minute, and it reuses the instance role and the path to RDS.
 - **What would change my mind:** more than a few concurrent users, an SLO above 99%, HTTPS on a domain, zero-downtime deploys, or ingestion and dashboard competing for burst credits (without credits a t3.micro drops to 10% per vCPU). Then the dashboard moves to Fargate behind a load balancer.
-- **Long-term operation:** `docker run -d --restart unless-stopped -p 8000:8000 --env-file .env airbreda-dashboard`. Docker and crond start at boot, so after a reboot or crash the dashboard restarts and ingestion resumes at the next slot. Air gaps heal (each run re-fetches 50 hours); NDW samples from the downtime are lost.
+- **Long-term operation:** `docker run -d --restart unless-stopped -p 8000:8000 --env-file .env airbreda-dashboard`. Docker and crond start at boot, so after a reboot or crash the dashboard restarts and ingestion resumes at the next slot. I tested this with a real reboot on 1 October: the dashboard answered again about 75 seconds later, and crond, the schedule and the swap file came back on their own. Air gaps heal (each run re-fetches 50 hours); NDW samples from the downtime are lost.
 - **What the local Compose test caught:** setting it up showed that containers cannot reuse my laptop's `aws login` session, so locally they get exported short-lived credentials, and that the dashboard turned expired credentials into a plain error instead of a 503, which I fixed before deploying. The run itself confirmed that `model.pkl` is inside the image and that all three services work together against the real RDS and S3. On the VM the instance role removes the credential problem.
 
-**Consequences.** No new cost, no new trust boundary and one deploy procedure for all images. But the dashboard shares RAM, swap and burst credits with ingestion; it serves plain HTTP on port 8000 without TLS; a stop and start, unlike a reboot, changes the public IP and so the URL (an Elastic IP would prevent that); and every redeploy or retrain is a `docker build` plus a restart, with seconds of downtime. **Extends, not supersedes:** one VM with Docker and cron still holds; ADR-005 adds a long-running workload class and its deployment.
+**Consequences.** No new cost, no new trust boundary and one deploy procedure for all images. But the dashboard shares RAM, swap and burst credits with ingestion; it serves plain HTTP on port 8000 without TLS; a stop and start, unlike a reboot, would change an auto-assigned public IP and so the URL, which is why I attached an Elastic IP (13.61.230.95) before handing in the link; it costs the same 0.005 USD an hour as the address it replaced while attached, and must be released at teardown; and every redeploy or retrain is a `docker build` plus a restart, with seconds of downtime. **Extends, not supersedes:** one VM with Docker and cron still holds; ADR-005 adds a long-running workload class and its deployment.
 
 ### ADR-006: ML Serving Architecture {#adr-006}
 
-**Status:** Accepted for the prototype; numbers from the final training at about 15:30.
+**Status:** Accepted for the prototype; numbers from the final training on the morning of 2 October.
 
 **Context.** Target: hourly NO2 at NL10240. Features: total A27 intensity (hourly mean of the 10-minute samples, summed over four sites) and local hour of day. Training data: {{N_ROWS}} hourly rows ({{TRAIN_RANGE}}). Flagged hours are excluded, as are hours in which any site has fewer than 3 samples spanning 30 minutes (the coverage rule the dashboard applies too) and hours without published NO2.
 
