@@ -36,8 +36,11 @@ if (-not $NoPush) {
     "model: retrain on $rows hourly rows and update the document numbers`n" | Set-Content -Encoding ascii $msg
     git add -A
     git commit -q -F $msg
-    # The repo belongs to the BUas account; gh may have another account active, so name it.
-    git -c credential.helper= -c 'credential.helper=!f() { echo username=MohammadaliJaberi244437; echo "password=$(gh auth token --user MohammadaliJaberi244437)"; }; f' push -q origin main
-    Write-Host "pushed; GitHub Pages rebuilds in about a minute"
+    # The repo belongs to the BUas account; gh may have another account active. The push runs
+    # in Git Bash because PowerShell mangles the quotes of an inline credential helper.
+    $bash = Join-Path (Split-Path (Split-Path (Get-Command git).Source)) 'bin\bash.exe'
+    & $bash tools/push.sh
+    if ($LASTEXITCODE) { throw 'push failed: the commit is local only, run tools/push.sh in Git Bash' }
+    Write-Host "GitHub Pages rebuilds in about a minute"
 }
 Write-Host "done: $rows rows"
