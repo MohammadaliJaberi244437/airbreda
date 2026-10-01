@@ -36,6 +36,20 @@ def values(meta):
     m = meta.get("metrics", {})
     c = meta.get("coefficients", {})
     r2 = m.get("r2_in_sample")
+    loo = m.get("mae_leave_one_out")
+    risk = meta.get("risk_comparison", {})
+    logistic = risk.get("logistic", {})
+    threshold = risk.get("threshold_ug_m3", 40.0)
+    if logistic.get("fitted"):
+        logistic_note = (
+            f"Stretch goal: a logistic classifier on 'the hour exceeded {threshold:g} ug/m3' was also fitted "
+            f"({risk.get('n_exceeded')} of {meta['n_rows']} hours exceed). With so few exceedance hours it cannot "
+            "place a reliable boundary, so the sigmoid on the regression stays the served score "
+            "(comparison in `model_meta.json`).")
+    else:
+        logistic_note = (
+            f"Stretch goal: a logistic classifier on 'the hour exceeded {threshold:g} ug/m3' was not fitted "
+            f"({logistic.get('skip_reason', 'not attempted')}), so the sigmoid on the regression is the served score.")
     trained = datetime.fromisoformat(meta["trained_at"]).astimezone(LOCAL)
     return {
         "N_ROWS": str(meta["n_rows"]),
@@ -48,6 +62,12 @@ def values(meta):
         "TRAINED_AT": f"{trained:%H:%M} on {trained.day} {trained:%B %Y} (Amsterdam time)",
         # train_model.py's plain-English verdict on the traffic coefficient's sign.
         "SIGN_NOTE": (meta.get("sign_check") or "not recorded").rstrip(".") + ".",
+        "MAE_LOO": "not available below 10 rows" if loo is None else f"{loo:.2f} ug/m3",
+        "EVAL_NOTE": ("Below 10 rows there is no test set, so these numbers say nothing about predictive skill."
+                      if loo is None else
+                      "Each hour is predicted by a model fitted on the other hours; neighbouring hours are "
+                      "correlated, so even this number is optimistic."),
+        "LOGISTIC_NOTE": logistic_note,
     }
 
 
