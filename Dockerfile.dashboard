@@ -1,0 +1,17 @@
+# AirBreda dashboard (FastAPI). Long-running, unlike the two ingestion jobs:
+#   docker run -d --restart unless-stopped --env-file .env -p 8000:8000 airbreda-dashboard
+# model.pkl and model_meta.json must exist first (python train_model.py).
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+
+COPY requirements-dashboard.txt .
+RUN pip install --no-cache-dir -r requirements-dashboard.txt \
+    && useradd --system --no-create-home dashboard
+
+COPY common.py features.py predict.py dashboard.py model.pkl model_meta.json ./
+USER dashboard
+
+EXPOSE 8000
+CMD ["uvicorn", "dashboard:app", "--host", "0.0.0.0", "--port", "8000"]

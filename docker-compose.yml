@@ -1,0 +1,25 @@
+# Local Day 4 test of all three containers: tools/compose-up.ps1 (builds, writes .env.aws with
+# short-lived 'aws login' credentials, runs 'up', and 'down' on exit).
+# The two ingestion jobs run once and exit, as under cron on the VM; the dashboard stays up.
+# They use the real .env, so they write to the real RDS database and S3 bucket.
+services:
+  air-ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: [.env, .env.aws]
+
+  traffic-ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile.traffic
+    env_file: [.env, .env.aws]
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    env_file: [.env, .env.aws]
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

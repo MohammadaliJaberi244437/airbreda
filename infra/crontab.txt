@@ -1,0 +1,5 @@
+# AirBreda ingestion schedule (server clock is UTC).
+# Air: hourly at :25. Luchtmeetnet publishes each hour about 20 minutes after it ends; polling more often adds no data.
+25 * * * * /usr/bin/docker run --rm --env-file /home/ec2-user/airbreda/.env airbreda-air >> /home/ec2-user/airbreda/logs/air.log 2>&1
+# Traffic: every 10 minutes. NDW values are 1-minute rates, so several samples per hour give a steadier hourly mean.
+*/10 * * * * /usr/bin/docker run --rm --env-file /home/ec2-user/airbreda/.env airbreda-traffic >> /home/ec2-user/airbreda/logs/traffic.log 2>&1

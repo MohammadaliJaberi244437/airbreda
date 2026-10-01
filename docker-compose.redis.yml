@@ -1,0 +1,52 @@
+# Day 2 lab: Redis messaging prototype. The two ingestion jobs run once, write to the
+# real RDS database and S3 bucket as usual (.env + .env.aws), and also push one JSON
+# message per reading onto the Redis list "readings". Redis stays up for inspection:
+#   docker compose -f docker-compose.redis.yml up --build -d
+#   docker exec redis redis-cli LLEN readings
+#   docker exec redis redis-cli LRANGE readings 0 4
+#   docker compose -f docker-compose.redis.yml down
+# .env.aws holds short-lived 'aws login' session credentials (see tools/compose-up.ps1);
+# it is git- and docker-ignored. The VM does not use this file and runs without Redis.
+name: airbreda-redis  # own project, so it never touches the Day 4 docker-compose.yml stack
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+    networks: [airbreda]
+
+  air-ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: air-ingest
+    env_file: [.env, .env.aws]
+    environment:
+      REDIS_HOST: redis
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [airbreda]
+
+  traffic-ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile.traffic
+    container_name: traffic-ingest
+    env_file: [.env, .env.aws]
+    environment:
+      REDIS_HOST: redis
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [airbreda]
+
+networks:
+  airbreda:
+    name: airbreda
+    driver: bridge

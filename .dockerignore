@@ -1,0 +1,14 @@
+data/
+out/
+.env
+.env.aws
+tests
+.git
+.venv/
+__pycache__/
+.pytest_cache/
+*.pem
+tools/
+docs/
+infra/
+training_data.csv

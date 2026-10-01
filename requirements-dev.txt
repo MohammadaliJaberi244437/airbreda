@@ -1,0 +1,8 @@
+-r requirements-ingest.txt
+-r requirements-dashboard.txt
+-r requirements-train.txt
+pytest==9.1.1
+# FastAPI's TestClient.
+httpx==0.28.1
+# Local only: lets boto3 use 'aws login' credentials. On EC2 the instance role is used instead.
+botocore[crt]==1.43.106

@@ -1,0 +1,12 @@
+# Day 2 Redis lab, captured 2026-10-01T09:46:54Z (docker compose -f docker-compose.redis.yml)
+# air-ingest and traffic-ingest both exited 0; readings_published counts: air 50, traffic 8
+$ docker exec redis redis-cli LLEN readings
+58
+$ docker exec redis redis-cli LRANGE readings 0 4
+{"station_id": "NL10240", "timestamp": "2026-09-29T08:00:00+00:00", "component": "NO2", "value": 19.76}
+{"station_id": "NL10240", "timestamp": "2026-09-29T09:00:00+00:00", "component": "NO2", "value": 20.92}
+{"station_id": "NL10240", "timestamp": "2026-09-29T10:00:00+00:00", "component": "NO2", "value": 24.1}
+{"station_id": "NL10240", "timestamp": "2026-09-29T11:00:00+00:00", "component": "NO2", "value": 25.71}
+{"station_id": "NL10240", "timestamp": "2026-09-29T12:00:00+00:00", "component": "NO2", "value": 26.46}
+$ docker exec redis redis-cli LRANGE readings -1 -1   (last message, from traffic-ingest)
+{"station_id": "RWS01_MONIBAS_0270vwa0063ra", "timestamp": "2026-10-01T09:43:00+00:00", "component": "speed", "value": 33.5}

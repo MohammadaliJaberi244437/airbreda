@@ -1,0 +1,7 @@
+requests==2.34.2
+# pandas 3.x needs Python 3.11+; 2.3.3 keeps local tests (3.10) and the image on one version.
+pandas==2.3.3
+psycopg2-binary==2.9.13
+boto3==1.43.106
+# Day 2 Redis messaging prototype (broker.py); unused unless REDIS_HOST is set.
+redis==8.1.0

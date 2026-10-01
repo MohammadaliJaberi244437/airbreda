@@ -1,0 +1,26 @@
+{
+  "trained_at": "2026-10-01T10:25:56+00:00",
+  "n_rows": 1,
+  "time_range": {
+    "start": "2026-10-01T10:00:00+00:00",
+    "end": "2026-10-01T10:00:00+00:00"
+  },
+  "features": [
+    "total_intensity_veh_per_hr",
+    "hour_of_day"
+  ],
+  "target": "no2_ug_m3",
+  "coefficients": {
+    "total_intensity_veh_per_hr": 0.0,
+    "hour_of_day": 0.0
+  },
+  "intercept": 22.68,
+  "metrics": {
+    "r2_in_sample": null,
+    "mae_in_sample": 0.0,
+    "mae_leave_one_out": null
+  },
+  "evaluation_note": "Only 1 row(s): no train/test split and no cross-validation; R2 and MAE are IN-SAMPLE (measured on the rows the model was fitted on) and overstate accuracy. With n <= 3 the model has at least as many parameters as rows, so it reproduces the training rows exactly; the metrics say nothing about predictive skill. R2 is undefined (it needs at least 2 rows with different NO2 values).",
+  "sign_check": "One row: no traffic effect can be estimated, the model predicts that row's NO2.",
+  "sklearn_version": "1.7.2"
+}

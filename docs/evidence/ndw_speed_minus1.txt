@@ -1,0 +1,16 @@
+# NDW speed = -1 on the A27 exit slip road (vwa, RWS01_MONIBAS_0270vwa0063ra), 2026-10-01
+# Source: s3://airbreda-raw-339879235060/ndw/2026-10-01/09-vwa.csv, read at about 10:00 UTC.
+# lane_speeds -1.0 is NDW's "no valid speed". In all three samples the same lane reported flow 0.0.
+measured_at,site,site_id,intensity_veh_per_hr,speed_kmh,lane_flows,lane_speeds,speed_invalid_count,captured_at
+2026-10-01T09:11:00Z,vwa,RWS01_MONIBAS_0270vwa0063ra,240.0,20.0,240.0;0.0,20.0;-1.0,1,2026-10-01T09:15:00+00:00
+2026-10-01T09:22:00Z,vwa,RWS01_MONIBAS_0270vwa0063ra,60.0,22.0,0.0;60.0,-1.0;22.0,1,2026-10-01T09:25:22+00:00
+2026-10-01T09:36:00Z,vwa,RWS01_MONIBAS_0270vwa0063ra,180.0,10.0,180.0;0.0,10.0;-1.0,1,2026-10-01T09:40:02+00:00
+
+# Matching ingestion_runs rows (SELECT source, run_at, rows_written, bad_data_count FROM ingestion_runs
+# WHERE bad_data_count > 0 OR NOT success ORDER BY run_at), read 2026-10-01 at about 10:00 UTC:
+# source        run_at (UTC)          rows_written  bad_data_count
+# NDW_backfill  2026-10-01 09:23:49   87            1    (laptop capture since 10:33 local; holds the 09:11 sample)
+# NDW           2026-10-01 09:25:22   7             1    (the 09:22 sample)
+# NDW           2026-10-01 09:40:03   7             1    (the 09:36 sample)
+# A normal live run writes 8 rows (4 sites x intensity and speed). 7 means the affected site's speed row
+# was skipped and its intensity row was still written. No failed runs at that time.

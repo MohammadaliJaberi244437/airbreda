@@ -1,0 +1,9 @@
+.env
+.env.aws
+data/
+out/
+__pycache__/
+*.pem
+.venv/
+*.pyc
+.pytest_cache/

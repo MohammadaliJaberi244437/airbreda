@@ -1,0 +1,21 @@
+<!-- AirBreda: GitHub Pages themes include this file at the end of <head>. -->
+<style>
+  /* One column instead of the theme's fixed sidebar and 500px column,
+     so the architecture diagram and the cost table get room. */
+  .wrapper { width: auto; max-width: 980px; margin: 0 auto; }
+  header, section, footer { float: none; position: static; width: auto; }
+  header { padding-bottom: 12px; margin-bottom: 28px; border-bottom: 1px solid #e5e5e5; }
+  footer { margin-top: 40px; }
+  /* The diagram may use the full window width; it scales down on small screens. */
+  pre.mermaid {
+    background: #ffffff; text-align: center; overflow-x: auto;
+    width: calc(100vw - 60px); max-width: 1720px;
+    position: relative; left: 50%; transform: translateX(-50%);
+  }
+  /* On a phone, scroll the diagram sideways instead of shrinking it to unreadable size. */
+  pre.mermaid svg { min-width: 900px; }
+</style>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, flowchart: { nodeSpacing: 30, rankSpacing: 40 } });
+</script>
