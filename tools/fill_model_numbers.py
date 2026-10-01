@@ -46,6 +46,8 @@ def values(meta):
         "COEF_HOUR": fmt_coef(c.get("hour_of_day"), 3),
         "INTERCEPT": fmt_coef(meta.get("intercept"), 2),
         "TRAINED_AT": f"{trained:%H:%M} on {trained.day} {trained:%B %Y} (Amsterdam time)",
+        # train_model.py's plain-English verdict on the traffic coefficient's sign.
+        "SIGN_NOTE": (meta.get("sign_check") or "not recorded").rstrip(".") + ".",
     }
 
 
