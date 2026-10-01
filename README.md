@@ -6,6 +6,8 @@ Course project, Breda University of Applied Sciences (BUas), MohammadAli Jaberi,
 
 Architecture Design Document (ADRs, diagram, costs, reflection): https://mohammadalijaberi244437.github.io/airbreda/
 
+Lab notebook (reflection, estimation and wrap-up answers, Days 1 to 4): https://mohammadalijaberi244437.github.io/airbreda/notebook/ (source: [docs/notebook.md](docs/notebook.md))
+
 ## Architecture
 
 All on AWS, Region eu-north-1 (Stockholm):
@@ -49,7 +51,7 @@ docker compose -f docker-compose.redis.yml down
 Remove-Item .env.aws
 ```
 
-Train the model (`build_training_data.py` writes `training_data.csv` and redraws `docs/img/no2_vs_intensity.png`; `train_model.py` writes `model.pkl` and `model_meta.json`, which the dashboard image copies in, so rebuild the dashboard image afterwards):
+Train the model (`build_training_data.py` writes `training_data.csv` and redraws `docs/img/no2_vs_intensity.png`; `train_model.py` writes `model.pkl` and `model_meta.json`, which the dashboard image copies in, so rebuild the dashboard image afterwards; when the data allow the logistic model it also writes `model_logistic.pkl`, which the image does not need but which must be committed together with `model_meta.json`, because the tests check that the two agree):
 
 ```
 python build_training_data.py
@@ -82,7 +84,7 @@ common.py                  logging, database, S3 and HTTP retry helpers
 broker.py                  optional Redis publishing, only when REDIS_HOST is set
 features.py                feature code shared by training and serving
 build_training_data.py     joins NO2 (RDS) with traffic CSVs (S3) into training_data.csv
-train_model.py             fits LinearRegression, writes model.pkl and model_meta.json
+train_model.py             fits LinearRegression (+ LogisticRegression when data allow), writes model.pkl, model_meta.json, model_logistic.pkl
 predict.py                 prediction and no2_exceedance_risk
 dashboard.py               FastAPI dashboard: /, /site/{site_id}, /health
 schema.sql                 sensor_readings and ingestion_runs

@@ -1,4 +1,7 @@
-"""model.pkl and predict(): the course checks plus clamping and the risk curve."""
+"""model.pkl and predict(): the course checks, clamping, the risk curve and the shipped
+model_meta.json."""
+import json
+
 import pytest
 
 import predict
@@ -40,3 +43,21 @@ def test_risk_is_one_half_at_the_threshold_and_rises_with_no2():
 def test_non_finite_input_raises():
     with pytest.raises(ValueError):
         predict.predict(float("nan"), 8)
+
+
+def test_shipped_meta_matches_the_shipped_models():
+    """model_meta.json's risk_comparison agrees with model.pkl and model_logistic.pkl."""
+    meta = json.loads(predict.META_PATH.read_text(encoding="utf-8"))
+    rc = meta["risk_comparison"]
+    assert len(rc["rows"]) == meta["n_rows"]
+    logistic_path = predict.MODEL_PATH.with_name("model_logistic.pkl")
+    assert rc["logistic"]["fitted"] == logistic_path.exists()
+    assert rc["logistic"]["fitted"] or rc["logistic"]["skip_reason"]
+    if rc["threshold_ug_m3"] != predict.THRESHOLD:
+        pytest.skip("NO2_THRESHOLD differs from the one the model was trained with")
+    for row in rc["rows"]:
+        result = predict.predict(row["total_intensity_veh_per_hr"], row["hour_of_day"])
+        assert result["no2_ug_m3_predicted"] == pytest.approx(row["no2_ug_m3_predicted"], abs=0.01)
+        assert result["no2_exceedance_risk"] == pytest.approx(row["regression_sigmoid_risk"],
+                                                              abs=1e-4)
+        assert (row["logistic_probability"] is None) != rc["logistic"]["fitted"]

@@ -1,5 +1,5 @@
 {
-  "trained_at": "2026-10-01T10:25:56+00:00",
+  "trained_at": "2026-10-01T11:16:22+00:00",
   "n_rows": 1,
   "time_range": {
     "start": "2026-10-01T10:00:00+00:00",
@@ -22,5 +22,40 @@
   },
   "evaluation_note": "Only 1 row(s): no train/test split and no cross-validation; R2 and MAE are IN-SAMPLE (measured on the rows the model was fitted on) and overstate accuracy. With n <= 3 the model has at least as many parameters as rows, so it reproduces the training rows exactly; the metrics say nothing about predictive skill. R2 is undefined (it needs at least 2 rows with different NO2 values).",
   "sign_check": "One row: no traffic effect can be estimated, the model predicts that row's NO2.",
-  "sklearn_version": "1.7.2"
+  "sklearn_version": "1.7.2",
+  "risk_comparison": {
+    "threshold_ug_m3": 40.0,
+    "n_exceeded": 0,
+    "logistic": {
+      "fitted": false,
+      "skip_reason": "too few rows: 1 < 10",
+      "file": null,
+      "coefficients_log_odds": null,
+      "intercept_log_odds": null
+    },
+    "in_sample": {
+      "regression_sigmoid": {
+        "brier_in_sample": 0.0009,
+        "brier_leave_one_out": null,
+        "exceedances_caught": 0,
+        "false_alarms": 0,
+        "min": 0.0304,
+        "max": 0.0304
+      },
+      "logistic": null
+    },
+    "comparison_note": "0 of 1 training hour(s) exceed 40 ug/m3. The sigmoid on the regression's predicted NO2 gives 0.03 (in-sample Brier 0.001); at >= 0.5 it raises 0 false alarm(s). The logistic model was not fitted (too few rows: 1 < 10). A logistic model learns only from the yes/no label, so it needs both outcomes and enough rows before it can place a boundary. The sigmoid on the regression is the more trustworthy score here: it uses every measured NO2 value rather than a yes/no label, rises smoothly with predicted NO2 (0.5 exactly where the prediction reaches 40 ug/m3) and is explained by the regression's coefficients. It is still a score, not a calibrated probability: its steepness (0.2 per ug/m3) is chosen, not fitted, and it is only as good as a regression on 1 hour(s).",
+    "rows": [
+      {
+        "timestamp": "2026-10-01T10:00:00+00:00",
+        "no2_ug_m3": 22.68,
+        "exceeded": false,
+        "total_intensity_veh_per_hr": 3829.1,
+        "hour_of_day": 11,
+        "no2_ug_m3_predicted": 22.68,
+        "regression_sigmoid_risk": 0.0304,
+        "logistic_probability": null
+      }
+    ]
+  }
 }
