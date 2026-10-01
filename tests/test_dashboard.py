@@ -13,8 +13,10 @@ from features import SITE_LABELS, window_hour_of_day
 UTC = timezone.utc
 REAL_LATEST_NO2, REAL_TRAFFIC_SNAPSHOT = dashboard.latest_no2, dashboard.traffic_snapshot
 NO2 = (datetime(2026, 10, 1, 9, tzinfo=UTC), 32.68, False)
-# The hour that just ended: a current window, whatever time the tests run.
-WINDOW_END = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+# The hour that is filling now: current for model_input's rule (label >= start of the current
+# hour) and still current after one hour rollover while the suite runs, so a run that
+# straddles hh:00:00 cannot turn the fixture stale.
+WINDOW_END = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 TRAFFIC = {site: {"intensity": value, "measured_at": WINDOW_END - timedelta(minutes=4),
                   "window_end": WINDOW_END, "n_samples": 6}
            for site, value in zip(SITE_LABELS, (1350.0, 900.0, 300.0, 240.0))}
@@ -80,10 +82,23 @@ def test_failing_prediction_still_returns_200_with_the_real_values(client, monke
     assert resp.status_code == 200
     body = resp.json()
     assert body["no2_exceedance_risk"] is None and body["no2_ug_m3_predicted"] is None
-    assert "model.pkl is corrupt" in body["prediction_error"]
+    # The client learns the exception type only; the message stays in the server log.
+    assert body["prediction_error"] == "prediction failed (RuntimeError); see server log"
+    assert "model.pkl" not in body["prediction_error"]
     assert body["no2_ug_m3"] == 32.68 and body["intensity_veh_per_hr"] == 300.0
-    assert len(_events(caplog, "prediction_failed")) == 1
+    [failed] = _events(caplog, "prediction_failed")
+    assert "model.pkl is corrupt" in failed.getMessage()
     assert len(_events(caplog, "request", logging.INFO)) == 1
+
+
+def test_json_logging_is_installed_at_import_time():
+    # uvicorn logs "Started server process" before any lifespan hook runs, so the JSON
+    # handler must already be in place once the module is imported.
+    from common import JsonFormatter
+    assert any(isinstance(h.formatter, JsonFormatter) for h in logging.getLogger().handlers)
+    for name in ("uvicorn", "uvicorn.error"):
+        assert logging.getLogger(name).handlers == [] and logging.getLogger(name).propagate
+    assert logging.getLogger("uvicorn.access").disabled
 
 
 def test_missing_site_traffic_skips_the_prediction(client, monkeypatch, predict_calls):
@@ -333,3 +348,52 @@ def test_index_page_fetches_the_four_sites_and_refreshes(client):
 def test_index_page_states_the_threshold_in_use(client):
     text = client.get("/").text
     assert f"minus {dashboard.THRESHOLD:g} &micro;g" in text and "__" not in text
+
+
+def test_index_page_loads_health_and_the_history_chart_too(client):
+    text = client.get("/").text
+    assert '"/health"' in text and '"/history?hours=24"' in text
+    assert 'aria-live="polite"' in text and "prefers-reduced-motion" in text
+
+
+# --- /history --------------------------------------------------------------------------
+
+HOUR = datetime(2026, 10, 1, 12, tzinfo=UTC)
+HRL, HRR, VWD, VWA = (dashboard.NDW_SITE_IDS[s] for s in SITE_LABELS)
+
+
+def test_history_joins_no2_and_hourly_traffic(client, monkeypatch):
+    def fake_query(sql, params):
+        if sql is dashboard.HISTORY_NO2_SQL:
+            assert params[:2] == (dashboard.STATION, dashboard.COMPONENT)
+            return [(HOUR - timedelta(hours=1), 18.4, False), (HOUR, None, True)]
+        assert sql is dashboard.HISTORY_TRAFFIC_SQL
+        assert set(params[0]) == set(dashboard.NDW_SITE_IDS.values())
+        later = HOUR + timedelta(hours=1)
+        return [(HOUR, HRL, 1200.0, 6), (HOUR, HRR, 900.0, 6), (HOUR, VWD, 300.0, 6), (HOUR, VWA, 240.0, 6),
+                (later, HRL, 1500.0, 2), (later, HRR, 950.0, 6), (later, VWD, 310.0, 6), (later, VWA, 250.0, 6)]
+    monkeypatch.setattr(dashboard, "_query", fake_query)
+    body = client.get("/history?hours=24").json()
+    assert body["hours"] == 24 and body["threshold_ug_m3"] == dashboard.THRESHOLD
+    assert body["no2"] == [
+        {"timestamp": "2026-10-01T11:00:00+00:00", "value": 18.4, "is_flagged": False},
+        {"timestamp": "2026-10-01T12:00:00+00:00", "value": None, "is_flagged": True}]
+    # The 13:00 hour has only 2 hrl samples, below MIN_SAMPLES, so it is left out.
+    assert body["traffic"] == [{
+        "window_end": "2026-10-01T12:00:00+00:00", "total_intensity_veh_per_hr": 2640.0,
+        "sites": {"hrl": 1200.0, "hrr": 900.0, "vwd": 300.0, "vwa": 240.0}, "min_samples": 6}]
+
+
+def test_history_clamps_the_hour_range(client, monkeypatch):
+    seen = []
+    monkeypatch.setattr(dashboard, "_query", lambda sql, params: seen.append(params[-1]) or [])
+    assert client.get("/history?hours=9999").json()["hours"] == dashboard.MAX_HISTORY_HOURS
+    assert client.get("/history?hours=0").json()["hours"] == 1
+    assert seen and all(isinstance(since, datetime) for since in seen)
+
+
+def test_history_database_down_is_a_503(client, monkeypatch):
+    def down(sql, params):
+        raise dashboard.SourceUnavailable("database", "database unreachable")
+    monkeypatch.setattr(dashboard, "_query", down)
+    assert client.get("/history").status_code == 503

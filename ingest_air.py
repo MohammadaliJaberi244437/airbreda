@@ -21,8 +21,8 @@ import pandas as pd
 import requests
 
 from broker import messages_from_rows, publish_readings
-from common import check_bad_threshold, fail_run, fetch, get_conn, log_event, record_run, \
-    setup_logging, write_rows
+from common import check_bad_threshold, fail_run, fetch, get_conn, last_successful_measurement, \
+    log_event, record_run, setup_logging, write_rows
 
 SOURCE = "Luchtmeetnet"
 STATION = "NL10240"
@@ -33,13 +33,21 @@ PARAMS = {"formula": COMPONENT, "order_by": "timestamp_measured",
 STALE_RUN = 3  # this many identical consecutive hourly values count as a frozen sensor
 
 # DO UPDATE instead of the course's DO NOTHING: still idempotent (re-running a page
-# changes nothing), but it also picks up Luchtmeetnet's later validated revisions of a
-# value and any change in our flag.
+# changes nothing), and it picks up Luchtmeetnet's later validated revisions of a value.
+# The flag is sticky while the value is unchanged: every run sees only the newest 50 hours,
+# so the oldest members of a frozen run drop off the page first and the rest would look
+# like a run shorter than STALE_RUN and be rewritten unflagged about 48 hours later
+# (replayed in tests/test_data_quality.py). A revised value gets this run's fresh flag.
 UPSERT_SQL = """
     INSERT INTO sensor_readings (station_id, timestamp, component, value, is_flagged)
     VALUES %s
     ON CONFLICT (station_id, timestamp, component)
-    DO UPDATE SET value = EXCLUDED.value, is_flagged = EXCLUDED.is_flagged
+    DO UPDATE SET
+        value = EXCLUDED.value,
+        is_flagged = CASE
+            WHEN sensor_readings.value IS DISTINCT FROM EXCLUDED.value THEN EXCLUDED.is_flagged
+            ELSE sensor_readings.is_flagged OR EXCLUDED.is_flagged
+        END
 """
 
 
@@ -58,12 +66,19 @@ def filter_no2_readings(df):
     return df[df["component"] == COMPONENT].reset_index(drop=True)
 
 
-def flag_bad_readings(df):
-    """Return (df sorted by time with an is_flagged column, number of flagged rows).
+def flag_bad_readings(df, since=None):
+    """Return (df sorted by time with an is_flagged column, number of new flagged rows).
 
     A row is flagged when its value is null, or when the value is unchanged for
     STALE_RUN or more consecutive hourly timestamps (every row of that run is flagged).
     Flagged rows are kept.
+
+    The rule runs over the whole page (the stale rule needs the neighbours) and every row
+    is written with its flag, but only rows newer than `since` (the previous successful
+    run's last measurement; None on the first run and in dry-run) are logged and counted.
+    Otherwise one 11-hour outage would stay inside the 50-hour page for two days and be
+    counted again on every hourly run, so ingestion_runs.bad_data_count and /health would
+    describe the page, not the last hour, and BAD_DATA_THRESHOLD_EXCEEDED would fire hourly.
     """
     df = df.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, format="ISO8601")
@@ -76,11 +91,16 @@ def flag_bad_readings(df):
     stale = df.groupby(run_id)["value"].transform("size") >= STALE_RUN
     df["is_flagged"] = df["value"].isna() | stale
 
-    for row in df[df["is_flagged"]].itertuples():
+    new = df["is_flagged"]
+    if since is not None:
+        since = pd.Timestamp(since)
+        since = since.tz_localize("UTC") if since.tzinfo is None else since.tz_convert("UTC")
+        new = new & (df["timestamp"] > since)
+    for row in df[new].itertuples():
         log_event(logging.WARNING, event="DATA_QUALITY_ERROR", source=SOURCE, station_id=STATION,
                   field=COMPONENT, reason="stale_or_null", value=row.value,
                   timestamp=row.timestamp.isoformat())
-    return df, int(df["is_flagged"].sum())
+    return df, int(new.sum())
 
 
 def to_db_rows(df):
@@ -98,7 +118,7 @@ def run(conn):
     except (requests.RequestException, ValueError) as exc:  # ValueError covers bad JSON too
         return fail_run(conn, SOURCE, "fetch_failed", exc, station_id=STATION)
 
-    df, bad_count = flag_bad_readings(df)
+    df, bad_count = flag_bad_readings(df, since=last_successful_measurement(conn, SOURCE))
     rows = to_db_rows(df)
     written = write_rows(conn, UPSERT_SQL, rows)
     publish_readings(messages_from_rows(rows))  # no-op unless REDIS_HOST is set

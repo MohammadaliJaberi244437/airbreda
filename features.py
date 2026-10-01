@@ -15,6 +15,9 @@ from zoneinfo import ZoneInfo
 
 LOCAL_TZ = ZoneInfo("Europe/Amsterdam")
 SITE_LABELS = ("hrl", "hrr", "vwd", "vwa")
+# NDW measurement site id per label; all four sit at hectometer 63 of the A27 near Breda.
+NDW_SITE_IDS = {"hrl": "RWS01_MONIBAS_0271hrl0063ra", "hrr": "RWS01_MONIBAS_0271hrr0063ra",
+                "vwd": "RWS01_MONIBAS_0270vwd0063ra", "vwa": "RWS01_MONIBAS_0270vwa0063ra"}
 FEATURES = ["total_intensity_veh_per_hr", "hour_of_day"]
 ONE_HOUR = timedelta(hours=1)
 NDW_KEY_RE = re.compile(r"^ndw/\d{4}-\d{2}-\d{2}/\d{2}-(hrl|hrr|vwd|vwa)\.csv$")

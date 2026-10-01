@@ -56,7 +56,7 @@ AirBreda writes about 100 rows an hour into a 104 kB table. One Postgres becomes
 
 *Which Checkpoint 1 decision would you be least confident defending?*
 
-On Day 1, RDS PostgreSQL: 0.09 GB a year at EUR 15.61 a month, 55% of the bill. I can defend the query shapes (0.077 ms for the latest-NO2 lookup today), but an examiner could ask why SQLite on the VM with an hourly copy to S3 would not do the same for zero euros, and my honest answer is backups and point-in-time restore. By Day 4 it had moved to the assumption that A27 traffic plus hour of day explains NO2 at Breda-Tilburgseweg, chosen because I could build it in a day, not because data showed it.
+On Day 1, RDS PostgreSQL: 0.09 GB a year at EUR 15.61 a month, 55% of the bill. I can defend the query shapes (about 0.1 ms for the latest-NO2 lookup, 0.07 to 0.13 ms across EXPLAIN ANALYZE runs), but an examiner could ask why SQLite on the VM with an hourly copy to S3 would not do the same for zero euros, and my honest answer is backups and point-in-time restore. By Day 4 it had moved to the assumption that A27 traffic plus hour of day explains NO2 at Breda-Tilburgseweg, chosen because I could build it in a day, not because data showed it.
 
 ### Wrap-up: before agreeing to DynamoDB
 
@@ -76,7 +76,7 @@ Per corridor and hour: 1 NO2 row plus 4 NDW sites x 2 metrics x 6 samples = 49 r
 
 *What is the most recent NO2 value right now, what does a null look like, and what does the pipeline do with it?*
 
-At 11:10 UTC on 1 October 2026 it is 22.68 ug/m3 for the hour ending 12:00 local (10:00 UTC); API, database and `/site/hrl` agree. I have not seen a null yet: none of the 50 API records or 51 database rows are null or flagged. A null arrives as `"value": null` in an otherwise normal record: `flag_bad_readings` turns it into NaN and sets `is_flagged = TRUE`, and `to_db_rows` converts NaN to `None` for a real SQL NULL. The row is kept and counted in `bad_data_count`; the dashboard skips nulls (`value IS NOT NULL`) and training excludes them.
+At 11:10 UTC on 1 October 2026 it is 22.68 ug/m3 for the hour ending 12:00 local (10:00 UTC); API, database and `/site/hrl` agree. I had not seen a null by then: none of the 50 API records or the 51 database rows at that time were null or flagged. A null arrives as `"value": null` in an otherwise normal record: `flag_bad_readings` turns it into NaN and sets `is_flagged = TRUE`, and `to_db_rows` converts NaN to `None` for a real SQL NULL. The row is kept and counted in `bad_data_count`; the dashboard skips nulls (`value IS NOT NULL`) and training excludes them.
 
 ## Day 2: messaging, resilience and data quality
 
@@ -110,7 +110,7 @@ Luchtmeetnet publishes one value an hour about 20 minutes after it ends, so I po
 
 *bad_data_count is 47 in the last hour: what do you check first, alert on, and let through?*
 
-NDW can produce at most 6 runs x 4 sites x 2 metrics = 48 an hour, so 47 means almost every reading failed: the feed marks every lane `dataError`, or my parser is broken. Check first: `/health` for the source, then the newest raw file in `raw/ndw/` (archived before parsing). Alert on `BAD_DATA_THRESHOLD_EXCEEDED` (above 10 per source per hour), failed runs and `/health` degraded. Let through: Luchtmeetnet nulls and stale values, kept with `is_flagged = TRUE`; NDW speed `-1`, dropped while intensity and the raw file are kept. That happened four times today, all on the exit slip road (09:11, 09:22, 09:36, 10:26 UTC), each in a lane with zero flow: no car that minute, not a broken sensor.
+NDW can produce at most 6 runs x 4 sites x 2 metrics = 48 an hour, so 47 means almost every reading failed: the feed marks every lane `dataError`, or my parser is broken. Check first: `/health` for the source, then the newest raw file in `raw/ndw/` (archived before parsing). Alert on `BAD_DATA_THRESHOLD_EXCEEDED` (above 10 per source per hour), failed runs and `/health` degraded. Let through: Luchtmeetnet nulls and stale values, kept with `is_flagged = TRUE`; NDW speed `-1`, dropped while intensity and the raw file are kept. By 11:10 UTC on 1 October that had happened four times, all on the exit slip road (09:11, 09:22, 09:36, 10:26 UTC), each in a lane with zero flow: no car that minute, not a broken sensor; it keeps recurring a few times a day.
 
 ### Wrap-up: the error budget
 
@@ -124,7 +124,7 @@ A 30-day month has 43,200 minutes; 0.5% is 216 minutes, 3.6 hours. A year has 8,
 
 *What did today's work cost?*
 
-About USD 1 of Free plan credits. List price is USD 1.07 a day (EUR 28.58 a month, with the bucket at its month-12 size): t3.micro 0.0108 x 24 = USD 0.26, db.t4g.micro 0.016 x 24 = USD 0.38, two public IPv4 addresses 2 x 0.005 x 24 = USD 0.24, EBS and RDS storage about USD 0.12, and S3 about USD 0.06 at the month-12 size (today, with one day of raw files in the bucket, the S3 line is about a cent and the day costs about USD 1.00). The Free plan is credit-based, so the card is never charged and the USD 10 monthly budget (`infra/budget.json`) shows USD 0.00 actual spend. Two findings: a second, unattached Elastic IP (13.63.11.20) costs USD 3.65 a month, and the raw archive grew by 16 files (18.9 MB) today, on track for 63 GB a year.
+About USD 1 of Free plan credits. List price is USD 1.07 a day (EUR 28.58 a month, with the bucket at its month-12 size): t3.micro 0.0108 x 24 = USD 0.26, db.t4g.micro 0.016 x 24 = USD 0.38, two public IPv4 addresses 2 x 0.005 x 24 = USD 0.24, EBS and RDS storage about USD 0.12, and S3 about USD 0.06 at the month-12 size (today, with one day of raw files in the bucket, the S3 line is about a cent and the day costs about USD 1.00). The Free plan is credit-based, so the card is never charged and the USD 10 monthly budget (`infra/budget.json`) shows USD 0.00 actual spend. Two findings: the database's public IPv4 (13.63.11.20) appears in the account as an Elastic IP on the RDS network interface and costs USD 3.65 a month, the same as the VM's; making RDS not publicly accessible would save it, at the price of running psql only from the VM. And the raw archive grew by 16 files (18.9 MB) today, on track for 63 GB a year.
 
 ### An unanticipated operational concern
 
@@ -138,7 +138,7 @@ That Amazon Linux 2023 ships without cron: my design was "cron starts two contai
 
 *What would you need to see in the data before trusting a more complex model?*
 
-Today the model is linear regression on one training row, so both coefficients are 0.0 and it predicts the intercept, 22.68 ug/m3. Before trusting anything more complex I would need: thousands of hourly rows, so traffic and hour of day stop being confounded; a time-based hold-out (never random: neighbouring hours are near copies) in which the complex model beats both linear regression and a naive same-hour-last-week baseline; a traffic coefficient with the expected positive sign; KNMI wind and temperature available at serving time; and a calibration check of the risk score against real hours above 40.
+At 13:16 on 1 October (Amsterdam time) the model was linear regression on one training row (the hour ending 10:00 UTC), so both coefficients were 0.0 and it predicted the intercept, 22.68 ug/m3; the retrain before the deadline adds every hour collected since, and the current numbers are in ADR-006 of the design document. Before trusting anything more complex I would need: thousands of hourly rows, so traffic and hour of day stop being confounded; a time-based hold-out (never random: neighbouring hours are near copies) in which the complex model beats both linear regression and a naive same-hour-last-week baseline; a traffic coefficient with the expected positive sign; KNMI wind and temperature available at serving time; and a calibration check of the risk score against real hours above 40.
 
 ### Wrap-up: 31 rows and a random forest
 

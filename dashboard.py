@@ -25,6 +25,9 @@ visible on the page and logged as an ERROR, not hidden behind a 500 that would a
 the real readings. Only when PostgreSQL or S3 is down is there nothing real to show, and
 then the answer is a 503 with the reason.
 
+GET /history returns the last N hours of NO2 and of total traffic (hourly mean per site
+summed over the four sites) straight from sensor_readings, for the page's chart.
+
 GET /health reads ingestion_runs only: the ingestion containers run and exit, so that
 table is the only record of whether they are working.
 """
@@ -33,7 +36,7 @@ import logging
 import os
 import threading
 import time
-from contextlib import asynccontextmanager, closing
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
 import boto3
@@ -45,7 +48,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from common import S3Store, get_conn, log_event, setup_logging
-from features import MIN_SAMPLES, MIN_SPAN, SITE_LABELS, hourly_site_windows, ndw_key_site, \
+from features import MIN_SAMPLES, MIN_SPAN, NDW_SITE_IDS, SITE_LABELS, hourly_site_windows, ndw_key_site, \
     parse_ndw_csv, total_intensity, window_hour_of_day
 from predict import THRESHOLD, model_meta, predict
 
@@ -71,6 +74,22 @@ HEALTH_SQL = """
            COALESCE(SUM(bad_data_count) FILTER (WHERE run_at > now() - interval '1 hour'), 0)
     FROM ingestion_runs WHERE source = ANY(%s) GROUP BY source
 """
+HISTORY_NO2_SQL = """
+    SELECT timestamp, value, is_flagged FROM sensor_readings
+    WHERE station_id = %s AND component = %s AND timestamp > %s
+    ORDER BY timestamp
+"""
+# Hourly mean intensity per NDW site, grouped by the Luchtmeetnet-style label of the hour
+# (its END, in UTC), the same label features.no2_window_label gives a sample.
+HISTORY_TRAFFIC_SQL = """
+    SELECT date_trunc('hour', timestamp AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + interval '1 hour',
+           station_id, AVG(value), COUNT(*)
+    FROM sensor_readings
+    WHERE component = 'intensity' AND station_id = ANY(%s) AND timestamp > %s
+    GROUP BY 1, 2
+"""
+MAX_HISTORY_HOURS = 168
+NDW_SITE_LABELS = {site_id: label for label, site_id in NDW_SITE_IDS.items()}
 
 
 class SourceUnavailable(Exception):
@@ -81,19 +100,21 @@ class SourceUnavailable(Exception):
         self.source, self.reason, self.detail = source, reason, detail
 
 
-@asynccontextmanager
-async def lifespan(_app):
+def _configure_logging():
+    """JSON logging for every line, installed at import time: uvicorn imports this module
+    before it logs "Started server process", so configuring in the lifespan hook would leave
+    those first lines in plain text. uvicorn's own plain-text handlers are dropped (its
+    records propagate to the JSON root handler) and its access log is replaced by
+    log_requests below."""
     setup_logging()
-    # uvicorn installs plain-text handlers: send its logs through the JSON root handler and
-    # drop its access log, which log_requests below replaces.
     for name in ("uvicorn", "uvicorn.error"):
         logging.getLogger(name).handlers.clear()
         logging.getLogger(name).propagate = True
     logging.getLogger("uvicorn.access").disabled = True
-    yield
 
 
-app = FastAPI(title="AirBreda dashboard", lifespan=lifespan)
+_configure_logging()
+app = FastAPI(title="AirBreda dashboard")
 
 
 @app.middleware("http")
@@ -281,7 +302,9 @@ def site(site_id: str):
             result = predict(total, window_hour_of_day(label))
             predicted, risk = result["no2_ug_m3_predicted"], result["no2_exceedance_risk"]
         except Exception as exc:  # degrade, do not fail: see the module docstring
-            error = f"prediction failed: {type(exc).__name__}: {exc}"
+            # Only the exception type goes to the client; the message can hold container
+            # paths or library internals, so it stays in the server log (like the 503 path).
+            error = f"prediction failed ({type(exc).__name__}); see server log"
             log_event(logging.ERROR, event="prediction_failed", site_id=site_id,
                       total_intensity_veh_per_hr=total, error=repr(exc))
     own = traffic.get(site_id, {})
@@ -333,6 +356,41 @@ def health():
     }
 
 
+def traffic_history(rows):
+    """[{window_end, total_intensity_veh_per_hr, sites, min_samples}], oldest first, for the
+    hours in which all four sites have at least MIN_SAMPLES samples. rows are
+    (hour label, station_id, mean intensity, sample count) from HISTORY_TRAFFIC_SQL."""
+    per_hour = {}
+    for label, station_id, mean, n in rows:
+        if site := NDW_SITE_LABELS.get(station_id):
+            per_hour.setdefault(label, {})[site] = (round(float(mean), 1), int(n))
+    out = []
+    for label in sorted(per_hour):
+        sites = per_hour[label]
+        if all(s in sites and sites[s][1] >= MIN_SAMPLES for s in SITE_LABELS):
+            out.append({"window_end": _iso(label),
+                        "total_intensity_veh_per_hr": total_intensity({s: sites[s][0] for s in SITE_LABELS}),
+                        "sites": {s: sites[s][0] for s in SITE_LABELS},
+                        "min_samples": min(sites[s][1] for s in SITE_LABELS)})
+    return out
+
+
+@app.get("/history")
+def history(hours: int = 24):
+    """Hourly NO2 and total traffic for the page's 24-hour chart.
+
+    A traffic hour counts when all four sites have MIN_SAMPLES samples in it: a looser cousin
+    of the training rule, which also needs a 30-minute span that this grouped query cannot
+    see. The chart is descriptive; the model input (GET /site) keeps the strict rule."""
+    hours = max(1, min(hours, MAX_HISTORY_HOURS))
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    no2 = [{"timestamp": _iso(ts), "value": value, "is_flagged": bool(flagged)}
+           for ts, value, flagged in _query(HISTORY_NO2_SQL, (STATION, COMPONENT, since))]
+    traffic = traffic_history(_query(HISTORY_TRAFFIC_SQL, (list(NDW_SITE_LABELS), since)))
+    return {"hours": hours, "since": _iso(since), "threshold_ug_m3": THRESHOLD,
+            "no2": no2, "traffic": traffic}
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return PAGE
@@ -343,169 +401,429 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AirBreda</title>
+<title>AirBreda: NO2 and A27 traffic</title>
 <style>
-:root { --bg:#f6f6f4; --card:#fff; --ink:#1d1d1f; --muted:#5f6268; --line:#e2e2df;
-  --warn-bg:#fff3d1; --warn-ink:#5e4300; --err-bg:#fde6e6; --err-ink:#7f1717; --bar:#2a6fdb; }
-@media (prefers-color-scheme: dark) { :root { --bg:#141518; --card:#1d1f23; --ink:#ececec;
-  --muted:#a3a6ac; --line:#30333a; --warn-bg:#3a2f12; --warn-ink:#f3d58a; --err-bg:#3d1c1c;
-  --err-ink:#f4b4b4; --bar:#6aa0ff; } }
-body { margin:0; background:var(--bg); color:var(--ink);
-  font:15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-main { max-width:940px; margin:0 auto; padding:24px 16px 40px; }
-h1 { font-size:22px; margin:0 0 4px; }
-.meta { color:var(--muted); font-size:13px; }
-.cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); gap:12px; margin:16px 0; }
-.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
-.label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
-.value { font-size:28px; font-weight:600; font-variant-numeric:tabular-nums; }
-.unit { font-size:14px; color:var(--muted); font-weight:400; }
-.banner { border-radius:8px; padding:10px 14px; margin:8px 0; font-weight:500; }
-.warn { background:var(--warn-bg); color:var(--warn-ink); }
-.err { background:var(--err-bg); color:var(--err-ink); }
-.scroll { overflow-x:auto; }
-table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); }
-th, td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums; white-space:nowrap; }
-th { font-size:12px; color:var(--muted); font-weight:600; }
-.num { text-align:right; }
-.bar { display:inline-block; width:56px; height:6px; background:var(--line); border-radius:3px; margin-left:8px; vertical-align:middle; }
-.bar span { display:block; height:100%; background:var(--bar); border-radius:3px; }
+:root { color-scheme: light; --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink-2:#52514e; --muted:#6e6c66;
+  --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,0.10); --blue:#2a78d6; --blue-track:#cde2fb; --orange:#eb6834;
+  --s1:#1c5cab; --s2:#2a78d6; --s3:#5598e7; --s4:#86b6ef; --good:#006300; --good-fill:#0ca30c; --warn-fill:#fab219;
+  --critical:#d03b3b; --warn-bg:#fff4d6; --warn-ink:#5e4300; --err-bg:#fde6e6; --err-ink:#7f1717; --focus:#2a78d6; }
+@media (prefers-color-scheme: dark) { :root { color-scheme: dark; --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink-2:#c3c2b7;
+  --muted:#9a988f; --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,0.10); --blue:#3987e5; --blue-track:#184f95; --orange:#d95926;
+  --s1:#2a78d6; --s2:#3987e5; --s3:#6da7ec; --s4:#9ec5f4; --good:#0ca30c; --warn-bg:#3a2f12; --warn-ink:#f3d58a; --err-bg:#3d1c1c; --err-ink:#f4b4b4; --focus:#6aa0ff; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--page); color:var(--ink); font:16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width:1120px; margin:0 auto; padding:28px 20px 48px; }
+a { color:var(--blue); }
+:focus-visible { outline:2px solid var(--focus); outline-offset:2px; border-radius:4px; }
+.top { display:flex; justify-content:space-between; align-items:flex-start; gap:24px; flex-wrap:wrap; margin-bottom:20px; }
+h1 { font-size:24px; line-height:1.2; margin:0 0 6px; letter-spacing:-0.01em; }
+h2 { font-size:17px; margin:0; }
+.sub { margin:0; color:var(--ink-2); max-width:62ch; }
+.meta { color:var(--muted); font-size:14px; }
+.status { display:flex; flex-direction:column; align-items:flex-end; gap:6px; }
+.pill { display:inline-flex; align-items:center; gap:8px; padding:6px 12px; border-radius:999px; border:1px solid var(--border);
+  background:var(--surface); font-size:14px; font-weight:500; }
+.pill svg { width:16px; height:16px; flex:none; }
+.pill.ok svg { color:var(--good-fill); } .pill.degraded svg { color:var(--critical); } .pill.unknown svg { color:var(--muted); }
+#banners:empty { display:none; }
+.banner { border-radius:8px; padding:10px 14px; margin:0 0 10px; font-weight:500; font-size:15px; }
+.warn { background:var(--warn-bg); color:var(--warn-ink); } .err { background:var(--err-bg); color:var(--err-ink); }
+.card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:18px 20px; }
+.kpis { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:14px; margin:0 0 14px; }
+.label { color:var(--ink-2); font-size:14px; }
+.value { font-size:44px; font-weight:600; line-height:1.1; margin:4px 0 2px; letter-spacing:-0.02em; }
+.unit { font-size:16px; color:var(--muted); font-weight:400; margin-left:4px; letter-spacing:0; }
+.meter { position:relative; height:8px; border-radius:4px; background:var(--blue-track); margin:12px 0 8px; overflow:visible; }
+.meter > span { display:block; height:100%; border-radius:4px; background:var(--blue); width:0; transition:width 300ms ease; }
+.meter .tick { position:absolute; top:-4px; width:2px; height:16px; background:var(--ink-2); }
+.meter .tick-label { position:absolute; top:14px; transform:translateX(-50%); font-size:12px; color:var(--muted); white-space:nowrap; }
+.kpi-foot { color:var(--muted); font-size:14px; margin-top:22px; }
+.shares { display:flex; gap:2px; height:8px; margin:12px 0 8px; border-radius:4px; overflow:hidden; }
+.shares > span { display:block; height:100%; min-width:2px; transition:flex-basis 300ms ease; }
+.card-head { display:flex; justify-content:space-between; align-items:baseline; gap:16px; flex-wrap:wrap; margin-bottom:6px; }
+.legend { display:flex; gap:18px; flex-wrap:wrap; font-size:14px; color:var(--ink-2); }
+.legend i { display:inline-block; width:14px; height:3px; vertical-align:middle; margin-right:6px; border-radius:2px; }
+.legend i.col { height:10px; width:10px; border-radius:2px; }
+.chart { position:relative; margin-top:6px; }
+.plot { overflow-x:auto; overflow-y:hidden; padding-bottom:4px; }
+.chart svg { display:block; width:100%; min-width:640px; height:auto; overflow:visible; }
+.chart text { font:12px system-ui, -apple-system, "Segoe UI", sans-serif; fill:var(--muted); }
+.chart .lbl { fill:var(--ink-2); font-weight:600; }
+.chart .ttl { fill:var(--ink-2); font-size:13px; font-weight:600; }
+.chart line.grid { stroke:var(--grid); stroke-width:1; } .chart line.base { stroke:var(--axis); stroke-width:1; }
+.chart line.ref { stroke:var(--ink-2); stroke-width:1; stroke-dasharray:0; opacity:0.7; }
+.chart .series { stroke:var(--blue); stroke-width:2; fill:none; stroke-linejoin:round; stroke-linecap:round; }
+.chart .wash { fill:var(--blue); opacity:0.10; }
+.chart .dot { fill:var(--blue); stroke:var(--surface); stroke-width:2; } .chart .dot.flag { fill:var(--surface); stroke:var(--blue); }
+.chart .col { fill:var(--orange); } .chart .col.hot { opacity:0.75; }
+.chart .hair { stroke:var(--ink-2); stroke-width:1; opacity:0; } .chart.active .hair { opacity:0.6; }
+.chart .hit { fill:transparent; cursor:crosshair; }
+.tip { position:absolute; pointer-events:none; background:var(--surface); border:1px solid var(--border); border-radius:8px;
+  padding:8px 12px; font-size:14px; box-shadow:0 4px 16px rgba(0,0,0,0.12); opacity:0; transition:opacity 120ms; min-width:190px; }
+.tip.show { opacity:1; } .tip .t { color:var(--muted); font-size:13px; margin-bottom:4px; }
+.tip .row { display:flex; justify-content:space-between; gap:16px; } .tip b { font-variant-numeric:tabular-nums; }
+.tip i { display:inline-block; width:12px; height:3px; vertical-align:middle; margin-right:6px; border-radius:2px; }
+details { margin-top:8px; } summary { cursor:pointer; color:var(--blue); font-size:14px; }
+.scroll { overflow-x:auto; margin-top:12px; }
+table { width:100%; border-collapse:collapse; font-size:15px; }
+th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--grid); white-space:nowrap; vertical-align:middle; }
+td { font-variant-numeric:tabular-nums; } th { font-size:13px; color:var(--muted); font-weight:600; }
+tr:last-child td { border-bottom:none; } .num { text-align:right; }
+.site { display:flex; align-items:center; gap:10px; } .site i { width:10px; height:10px; border-radius:2px; flex:none; }
+.site small { display:block; color:var(--muted); font-size:13px; }
+.bar { display:inline-block; width:120px; height:6px; background:var(--grid); border-radius:3px; margin-left:10px; vertical-align:middle; }
+.bar span { display:block; height:100%; background:var(--blue); border-radius:3px; transition:width 300ms ease; }
+.risk { display:inline-flex; align-items:center; gap:10px; } .risk .m { width:72px; height:6px; background:var(--grid); border-radius:3px; }
+.risk .m span { display:block; height:100%; border-radius:3px; } .risk small { color:var(--muted); }
+.notes { margin-top:14px; color:var(--muted); font-size:14px; } .notes p { margin:6px 0; }
+.links { display:flex; gap:16px; flex-wrap:wrap; margin-top:10px; font-size:14px; }
+@media (max-width:640px) { .value { font-size:38px; } .status { align-items:flex-start; } main { padding:20px 16px 40px; } .bar { width:72px; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition:none !important; } }
 </style>
 </head>
 <body>
 <main>
-<h1>AirBreda: NO<sub>2</sub> and A27 traffic</h1>
-<div class="meta">Luchtmeetnet station NL10240 (Breda) and four NDW measuring sites on the A27. Refreshes every 60 s.</div>
-<div id="banners"></div>
-<div class="cards">
-  <div class="card"><div class="label">Measured NO<sub>2</sub></div><div class="value" id="no2">-</div><div class="meta" id="no2-time"></div></div>
-  <div class="card"><div class="label">Predicted NO<sub>2</sub></div><div class="value" id="pred">-</div><div class="meta" id="risk"></div></div>
-  <div class="card"><div class="label">Total traffic, 4 sites</div><div class="value" id="total">-</div><div class="meta" id="traffic-time"></div></div>
+<header class="top">
+  <div>
+    <h1>AirBreda: NO<sub>2</sub> and A27 traffic</h1>
+    <p class="sub">Hourly nitrogen dioxide at Luchtmeetnet station NL10240 (Breda-Tilburgseweg) and vehicle intensity at four NDW measuring sites on the A27 interchange, with the model's prediction for the current hour.</p>
+  </div>
+  <div class="status">
+    <span class="pill unknown" id="health" title="Ingestion status from /health"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/></svg><span id="health-text">Checking ingestion</span></span>
+    <span class="meta" id="updated">Loading</span>
+  </div>
+</header>
+<div id="banners" aria-live="polite"></div>
+
+<section class="kpis" aria-label="Current readings">
+  <div class="card">
+    <div class="label">Measured NO<sub>2</sub></div>
+    <div class="value" id="no2">-</div>
+    <div class="meter" role="meter" aria-label="Measured NO2 against the __THRESHOLD__ microgram threshold" aria-valuemin="0" aria-valuemax="80" aria-valuenow="0" id="no2-meter"><span></span><i class="tick" id="no2-tick"></i><span class="tick-label" id="no2-tick-label">__THRESHOLD__ &micro;g/m&sup3;</span></div>
+    <div class="kpi-foot" id="no2-time">Loading</div>
+  </div>
+  <div class="card">
+    <div class="label">Predicted NO<sub>2</sub> for this hour</div>
+    <div class="value" id="pred">-</div>
+    <div class="meter" role="meter" aria-label="Exceedance risk from 0 to 1" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0" id="risk-meter"><span></span></div>
+    <div class="kpi-foot" id="risk">Loading</div>
+  </div>
+  <div class="card">
+    <div class="label">Total traffic, four sites</div>
+    <div class="value" id="total">-</div>
+    <div class="shares" id="shares" aria-hidden="true"></div>
+    <div class="kpi-foot" id="traffic-time">Loading</div>
+  </div>
+</section>
+
+<section class="card" aria-label="Last 24 hours">
+  <div class="card-head">
+    <div><h2>Last 24 hours</h2><div class="meta">One point per hour. Hover or use the arrow keys for values.</div></div>
+    <div class="legend"><span><i style="background:var(--blue)"></i>NO<sub>2</sub> (&micro;g/m&sup3;)</span><span><i class="col" style="background:var(--orange)"></i>Total traffic (veh/h)</span></div>
+  </div>
+  <div class="chart" id="chart" tabindex="0" aria-label="NO2 and traffic over the last 24 hours; the table below holds the same values">
+    <div class="plot"><svg id="svg" viewBox="0 0 1000 420" role="img" aria-hidden="true"></svg></div>
+    <div class="tip" id="tip"></div>
+  </div>
+  <details><summary>Show the 24 hours as a table</summary>
+    <div class="scroll"><table><thead><tr><th>Hour (local)</th><th class="num">NO<sub>2</sub> (&micro;g/m&sup3;)</th><th class="num">Total traffic (veh/h)</th></tr></thead><tbody id="hist-rows"></tbody></table></div>
+  </details>
+</section>
+
+<section class="card" style="margin-top:14px" aria-label="Per site">
+  <div class="card-head"><div><h2>The four A27 sites</h2><div class="meta">Hourly mean intensity per site. The prediction uses the total of all four, so it is the same for every site.</div></div></div>
+  <div class="scroll"><table>
+  <thead><tr><th>Site</th><th class="num">Traffic (veh/h)</th><th>Hourly window (local)</th><th class="num">Predicted NO<sub>2</sub></th><th>Exceedance risk</th></tr></thead>
+  <tbody id="rows"></tbody>
+  </table></div>
+</section>
+
+<div class="notes">
+  <p id="model">Model: loading.</p>
+  <p>Traffic is the mean of a site's samples in its newest clock hour with at least __MIN_SAMPLES__ samples spanning __MIN_SPAN__ minutes,
+  the rule the training data uses; until the current hour has that many, the hour that just ended is shown. Exceedance risk is a 0-1 score,
+  not a calibrated probability: a sigmoid of predicted NO<sub>2</sub> minus __THRESHOLD__ &micro;g/m&sup3; (0.5 at __THRESHOLD__; set by
+  NO2_THRESHOLD, default 40, the EU annual limit value, used here as an hourly reference). Hours are labelled by their end, as Luchtmeetnet does.</p>
+  <div class="links"><a href="/site/hrl">/site/hrl</a><a href="/health">/health</a><a href="/history?hours=24">/history</a><a href="https://mohammadalijaberi244437.github.io/airbreda/">Architecture document</a></div>
 </div>
-<div class="scroll"><table>
-<thead><tr><th>Site</th><th class="num">Traffic (veh/h, hourly mean)</th><th>Hourly window (local)</th>
-<th class="num">Predicted NO<sub>2</sub> (&micro;g/m&sup3;)</th><th class="num">Exceedance risk</th></tr></thead>
-<tbody id="rows"></tbody>
-</table></div>
-<p class="meta" id="updated"></p>
-<p class="meta">Traffic is the mean of a site's samples in its newest clock hour with at least __MIN_SAMPLES__ samples
-spanning __MIN_SPAN__ minutes, the rule the training data uses; until the current hour has that many, the hour that
-just ended is shown. The prediction uses the total of all four sites in one shared hourly window and the local hour
-of that window, so it is the same for every site. Exceedance risk is a 0-1 score, not a calibrated probability: a
-sigmoid of predicted NO<sub>2</sub> minus __THRESHOLD__ &micro;g/m&sup3; (0.5 at __THRESHOLD__; set by NO2_THRESHOLD,
-default 40, the EU annual limit, used here as an hourly reference).</p>
-<p class="meta" id="model"></p>
 </main>
 <script>
 const SITES = ["hrl", "hrr", "vwd", "vwa"];
-const NAMES = {hrl: "hrl (A27 main, dir. 1)", hrr: "hrr (A27 main, dir. 2)",
-               vwd: "vwd (entry slip road)", vwa: "vwa (exit slip road)"};
+const NAMES = {hrl: "A27 mainline, direction 1", hrr: "A27 mainline, direction 2",
+               vwd: "Entry slip road (leaving Breda)", vwa: "Exit slip road (entering Breda)"};
+const SWATCH = {hrl: "var(--s1)", hrr: "var(--s2)", vwd: "var(--s3)", vwa: "var(--s4)"};
 const AIR_MAX_MIN = 120, FETCH_TIMEOUT_MS = 15000, HOUR_MS = 3600000;
 const $ = id => document.getElementById(id);
 const has = v => v !== null && v !== undefined;
-const show = v => has(v) ? String(v) : "n/a";
+const num = (v, d) => has(v) ? Number(v).toLocaleString("en-GB", {minimumFractionDigits: d, maximumFractionDigits: d}) : "n/a";
 const ageMin = iso => (Date.now() - new Date(iso).getTime()) / 60000;
 const TZ = {timeZone: "Europe/Amsterdam"};
-const local = iso => has(iso) ? new Date(iso).toLocaleString("en-GB", {...TZ,
-  day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit"}) : "n/a";
+const local = iso => has(iso) ? new Date(iso).toLocaleString("en-GB", {...TZ, day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit"}) : "n/a";
 const clock = iso => new Date(iso).toLocaleTimeString("en-GB", {...TZ, hour: "2-digit", minute: "2-digit"});
-// A window is labelled by its END, like Luchtmeetnet's hours: show it as start-end.
-const windowText = end => has(end)
-  ? local(new Date(new Date(end).getTime() - HOUR_MS).toISOString()) + "-" + clock(end) : "n/a";
+// Hours are labelled by their END, like Luchtmeetnet's: show them as start-end.
+const windowText = end => has(end) ? clock(new Date(new Date(end).getTime() - HOUR_MS).toISOString()) + "-" + clock(end) : "n/a";
 const hourStart = () => { const d = new Date(); d.setUTCMinutes(0, 0, 0); return d; };
+const SVG = "http://www.w3.org/2000/svg";
 
-function cell(row, text, cls) {
-  const td = document.createElement("td");
-  td.textContent = text;
-  if (cls) td.className = cls;
-  row.appendChild(td);
-  return td;
+function el(tag, attrs, text) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) k === "style" ? node.style.cssText = v : node.setAttribute(k, v);
+  if (has(text)) node.textContent = text;
+  return node;
 }
-
-function banner(text, cls) {
-  const div = document.createElement("div");
-  div.className = "banner " + cls;
-  div.textContent = text;
-  $("banners").appendChild(div);
+function svgEl(tag, attrs, text) {
+  const node = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+  if (has(text)) node.textContent = text;
+  return node;
 }
+function setValue(id, value, digits, unit) {
+  const box = $(id);
+  box.replaceChildren(document.createTextNode(num(value, digits)), el("span", {class: "unit"}, unit));
+}
+function banner(text, cls) { $("banners").appendChild(el("div", {class: "banner " + cls}, text)); }
+function riskColor(r) { return r < 0.33 ? "var(--blue)" : r < 0.66 ? "var(--warn-fill)" : "var(--critical)"; }
+function riskWord(r) { return r < 0.33 ? "low" : r < 0.66 ? "elevated" : "high"; }
 
-async function fetchSite(site) {
+async function fetchJson(path, label) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
   try {
-    const resp = await fetch("/site/" + site, {cache: "no-store", signal: ctl.signal});
+    const resp = await fetch(path, {cache: "no-store", signal: ctl.signal});
     const body = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error("HTTP " + resp.status + (body.reason ? " (" + body.reason + ")" : ""));
     return body;
   } catch (e) {
-    throw new Error(site + ": " + (e.name === "AbortError" ? "no answer within 15 s" : e.message));
+    throw new Error(label + ": " + (e.name === "AbortError" ? "no answer within 15 s" : e.message));
   } finally {
     clearTimeout(timer);
   }
 }
+const fetchSite = site => fetchJson("/site/" + site, site);
 
-async function refresh() {
-  const results = await Promise.allSettled(SITES.map(fetchSite));
-  const data = {};
-  $("banners").replaceChildren();
-  results.forEach((r, i) => {
-    if (r.status === "fulfilled") data[SITES[i]] = r.value;
-    else banner("Could not load " + r.reason.message, "err");
-  });
+function renderHealth(h) {
+  const pill = $("health");
+  const ok = h && h.status === "ok";
+  pill.className = "pill " + (h ? (ok ? "ok" : "degraded") : "unknown");
+  const icon = ok ? "M20 6L9 17l-5-5" : "M12 8v5m0 3h.01M10.3 3.9L2.4 18a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z";
+  pill.querySelector("svg").replaceChildren(svgEl("path", {d: icon, fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round"}));
+  $("health-text").textContent = h ? (ok ? "Ingestion running" : "Ingestion degraded") : "Ingestion status unknown";
+  if (h) pill.title = "Luchtmeetnet last fetch " + local(h.luchtmeetnet.last_successful_fetch) + ", bad data last hour " + h.luchtmeetnet.bad_data_count
+    + ". NDW last fetch " + local(h.ndw.last_successful_fetch) + ", bad data last hour " + h.ndw.bad_data_count + ".";
+}
+
+function renderKpis(data) {
   const ok = Object.values(data);
-
   const air = ok.find(d => has(d.no2_ug_m3));
-  $("no2").replaceChildren(show(air && air.no2_ug_m3));
-  $("no2").insertAdjacentHTML("beforeend", ' <span class="unit">&micro;g/m&sup3;</span>');
-  $("no2-time").textContent = air ? "hour ending " + local(air.timestamp) : "no reading";
+  setValue("no2", air && air.no2_ug_m3, 1, "\u00b5g/m\u00b3");
+  const meter = $("no2-meter"), threshold = __THRESHOLD__;
+  const scaleMax = Math.max(2 * threshold, air ? air.no2_ug_m3 * 1.15 : 0);
+  meter.setAttribute("aria-valuemax", Math.round(scaleMax));
+  meter.setAttribute("aria-valuenow", air ? air.no2_ug_m3 : 0);
+  meter.firstElementChild.style.width = air ? Math.min(100, air.no2_ug_m3 / scaleMax * 100) + "%" : "0";
+  $("no2-tick").style.left = threshold / scaleMax * 100 + "%";
+  $("no2-tick-label").style.left = threshold / scaleMax * 100 + "%";
+  $("no2-time").textContent = air ? "Hour ending " + local(air.timestamp) + ", Luchtmeetnet NL10240" : "No NO2 reading available";
   if (!air) banner("No NO2 reading available.", "warn");
   else {
-    if (ageMin(air.timestamp) > AIR_MAX_MIN)
-      banner("Stale NO2: the newest reading (hour ending " + local(air.timestamp) + ") is older than 2 h.", "warn");
-    if (air.no2_is_flagged)
-      banner("The newest NO2 reading (hour ending " + local(air.timestamp) + ") is flagged by ingestion as stale "
-        + "or suspect (a value repeated hour after hour) and is left out of training. Treat it with caution.", "warn");
+    if (ageMin(air.timestamp) > AIR_MAX_MIN) banner("Stale NO2: the newest reading (hour ending " + local(air.timestamp) + ") is older than 2 h.", "warn");
+    if (air.no2_is_flagged) banner("The newest NO2 reading (hour ending " + local(air.timestamp) + ") is flagged by ingestion as stale or suspect (a value repeated hour after hour) and is left out of training. Treat it with caution.", "warn");
   }
 
   const pred = ok.find(d => has(d.no2_ug_m3_predicted));
-  $("pred").replaceChildren(show(pred && pred.no2_ug_m3_predicted));
-  $("pred").insertAdjacentHTML("beforeend", ' <span class="unit">&micro;g/m&sup3;</span>');
-  $("risk").textContent = pred ? "exceedance risk " + show(pred.no2_exceedance_risk) : "no prediction";
+  setValue("pred", pred && pred.no2_ug_m3_predicted, 1, "\u00b5g/m\u00b3");
+  const rm = $("risk-meter"), r = pred ? pred.no2_exceedance_risk : null;
+  rm.setAttribute("aria-valuenow", has(r) ? r : 0);
+  rm.firstElementChild.style.width = has(r) ? r * 100 + "%" : "0";
+  rm.firstElementChild.style.background = has(r) ? riskColor(r) : "transparent";
+  $("risk").textContent = has(r) ? "Exceedance risk " + num(r, 2) + " (" + riskWord(r) + "), hour " + windowText(pred.traffic_window_end) : "No prediction for this hour";
   [...new Set(ok.map(d => d.prediction_error).filter(has))].forEach(e => banner("Prediction unavailable: " + e, "err"));
 
   const tot = ok.find(d => has(d.total_intensity_veh_per_hr));
-  $("total").replaceChildren(show(tot && tot.total_intensity_veh_per_hr));
-  $("total").insertAdjacentHTML("beforeend", ' <span class="unit">veh/h</span>');
-  $("traffic-time").textContent = tot ? "hourly window " + windowText(tot.traffic_window_end)
-    : "no current hourly window shared by all four sites";
+  setValue("total", tot && tot.total_intensity_veh_per_hr, 0, "veh/h");
+  const shares = $("shares");
+  shares.replaceChildren();
+  if (tot) SITES.forEach(s => {
+    const v = data[s] && data[s].intensity_veh_per_hr;
+    if (has(v)) shares.appendChild(el("span", {style: "flex:" + v + " 1 0; background:" + SWATCH[s]}));
+  });
+  $("traffic-time").textContent = tot ? "Hourly mean, " + windowText(tot.traffic_window_end) + " (hrl, hrr, vwd, vwa shares above)"
+    : "No current hourly window shared by all four sites";
   const ends = ok.map(d => d.traffic_window_end).filter(has).sort();
   if (!ends.length) banner("No traffic data available.", "warn");
-  else if (new Date(ends[0]) < hourStart())
-    banner("Stale traffic: the oldest site window (" + windowText(ends[0]) + ") ended before the current hour.", "warn");
+  else if (new Date(ends[0]) < hourStart()) banner("Stale traffic: the oldest site window (" + windowText(ends[0]) + ") ended before the current hour.", "warn");
 
   const tbody = $("rows");
   tbody.replaceChildren();
+  const maxI = Math.max(1, ...ok.map(d => d.intensity_veh_per_hr || 0));
   SITES.forEach(s => {
     const d = data[s] || {};
-    const tr = document.createElement("tr");
-    cell(tr, NAMES[s]);
-    cell(tr, show(d.intensity_veh_per_hr), "num");
-    cell(tr, windowText(d.traffic_window_end) + (has(d.traffic_n_samples) ? ", " + d.traffic_n_samples + " samples" : ""));
-    cell(tr, show(d.no2_ug_m3_predicted), "num");
-    const td = cell(tr, show(d.no2_exceedance_risk), "num");
+    const tr = el("tr");
+    const site = el("div", {class: "site"});
+    site.appendChild(el("i", {style: "background:" + SWATCH[s]}));
+    const name = el("div", {}, s);
+    name.appendChild(el("small", {}, NAMES[s]));
+    site.appendChild(name);
+    tr.appendChild(el("td")).appendChild(site);
+    const tdI = el("td", {class: "num"}, num(d.intensity_veh_per_hr, 0));
+    if (has(d.intensity_veh_per_hr)) { const bar = el("span", {class: "bar"}); bar.appendChild(el("span", {style: "width:" + (d.intensity_veh_per_hr / maxI * 100) + "%"})); tdI.appendChild(bar); }
+    tr.appendChild(tdI);
+    tr.appendChild(el("td", {}, has(d.traffic_window_end) ? windowText(d.traffic_window_end) + (has(d.traffic_n_samples) ? ", " + d.traffic_n_samples + " samples" : "") : "n/a"));
+    tr.appendChild(el("td", {class: "num"}, num(d.no2_ug_m3_predicted, 1)));
+    const tdR = el("td");
     if (has(d.no2_exceedance_risk)) {
-      td.insertAdjacentHTML("beforeend", '<span class="bar"><span></span></span>');
-      td.querySelector(".bar span").style.width = (d.no2_exceedance_risk * 100) + "%";
-    }
+      const wrap = el("span", {class: "risk"});
+      const m = el("span", {class: "m"}); m.appendChild(el("span", {style: "width:" + (d.no2_exceedance_risk * 100) + "%; background:" + riskColor(d.no2_exceedance_risk)}));
+      wrap.appendChild(m); wrap.appendChild(document.createTextNode(num(d.no2_exceedance_risk, 2) + " ")); wrap.appendChild(el("small", {}, riskWord(d.no2_exceedance_risk)));
+      tdR.appendChild(wrap);
+    } else tdR.textContent = "n/a";
+    tr.appendChild(tdR);
     tbody.appendChild(tr);
   });
 
-  const newest = ok.map(d => d.traffic_timestamp).filter(has).sort().pop();
-  $("updated").textContent = "Last updated " + local(new Date().toISOString()) + " (Europe/Amsterdam). NO2: hour ending "
-    + local(air && air.timestamp) + ". Traffic: newest sample used " + local(newest) + ".";
   const m = ok.find(d => has(d.model_trained_at));
-  $("model").textContent = m ? "Model: linear regression trained " + local(m.model_trained_at) + " on "
-    + m.model_n_rows + " hour(s)" + (m.model_n_rows < 10 ? ", too few to be reliable." : ".") : "Model: no metadata.";
+  $("model").textContent = m ? "Model: linear regression on total traffic and hour of day, trained " + local(m.model_trained_at) + " on " + m.model_n_rows
+    + " hour" + (m.model_n_rows === 1 ? "" : "s") + " of this pipeline's own data" + (m.model_n_rows < 10 ? ", too few to be reliable yet." : ".") : "Model: no metadata.";
+}
+
+// --- 24-hour chart: NO2 line above, traffic columns below, one shared crosshair ---------------
+const chart = {hours: [], no2: new Map(), traffic: new Map(), idx: -1};
+const W = 1000, PAD = {l: 56, r: 24}, NO2_Y = {top: 28, h: 190}, TR_Y = {top: 262, h: 120};
+
+function niceMax(v) { if (!(v > 0)) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); const n = v / p; return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * p; }
+function ticks(max, count) { const step = niceMax(max / count); const out = []; for (let v = 0; v <= max + 1e-9; v += step) out.push(v); return out; }
+
+function renderHistory(hist) {
+  const svg = $("svg");
+  svg.replaceChildren();
+  const end = hourStart().getTime() + HOUR_MS;          // the hour filling now, labelled by its end
+  const start = end - 24 * HOUR_MS;
+  chart.hours = []; chart.no2 = new Map(); chart.traffic = new Map();
+  for (let t = start; t <= end; t += HOUR_MS) chart.hours.push(t);
+  (hist.no2 || []).forEach(p => chart.no2.set(new Date(p.timestamp).getTime(), p));
+  (hist.traffic || []).forEach(p => chart.traffic.set(new Date(p.window_end).getTime(), p));
+  const innerW = W - PAD.l - PAD.r, hourW = innerW / 24;
+  const x = t => PAD.l + (t - start) / HOUR_MS * hourW - hourW / 2;      // the hour's midpoint
+  const no2Max = niceMax(Math.max(hist.threshold_ug_m3 || 40, ...[...chart.no2.values()].map(p => p.value || 0)) * 1.15);
+  const trMax = niceMax(Math.max(1000, ...[...chart.traffic.values()].map(p => p.total_intensity_veh_per_hr || 0)) * 1.1);
+  const yN = v => NO2_Y.top + NO2_Y.h - v / no2Max * NO2_Y.h;
+  const yT = v => TR_Y.top + TR_Y.h - v / trMax * TR_Y.h;
+
+  svg.appendChild(svgEl("text", {x: PAD.l, y: 14, class: "ttl"}, "NO2 (\u00b5g/m\u00b3)"));
+  svg.appendChild(svgEl("text", {x: PAD.l, y: TR_Y.top - 12, class: "ttl"}, "Total traffic (veh/h)"));
+  ticks(no2Max, 4).forEach(v => {
+    svg.appendChild(svgEl("line", {x1: PAD.l, x2: W - PAD.r, y1: yN(v), y2: yN(v), class: v === 0 ? "base" : "grid"}));
+    svg.appendChild(svgEl("text", {x: PAD.l - 8, y: yN(v) + 4, "text-anchor": "end"}, num(v, 0)));
+  });
+  ticks(trMax, 3).forEach(v => {
+    svg.appendChild(svgEl("line", {x1: PAD.l, x2: W - PAD.r, y1: yT(v), y2: yT(v), class: v === 0 ? "base" : "grid"}));
+    svg.appendChild(svgEl("text", {x: PAD.l - 8, y: yT(v) + 4, "text-anchor": "end"}, num(v, 0)));
+  });
+  const thr = hist.threshold_ug_m3 || 40;
+  if (thr < no2Max) {
+    svg.appendChild(svgEl("line", {x1: PAD.l, x2: W - PAD.r, y1: yN(thr), y2: yN(thr), class: "ref"}));
+    svg.appendChild(svgEl("text", {x: W - PAD.r, y: yN(thr) - 5, "text-anchor": "end", class: "lbl"}, num(thr, 0) + " EU annual limit"));
+  }
+  chart.hours.forEach((t, i) => {
+    if (i % 3 === 0) svg.appendChild(svgEl("text", {x: x(t), y: TR_Y.top + TR_Y.h + 18, "text-anchor": "middle"}, windowText(new Date(t).toISOString()).split("-")[0]));
+  });
+
+  const pts = chart.hours.filter(t => chart.no2.has(t) && has(chart.no2.get(t).value)).map(t => [x(t), yN(chart.no2.get(t).value), t]);
+  if (pts.length > 1) {
+    const d = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
+    svg.appendChild(svgEl("path", {d: d + " L" + pts[pts.length - 1][0].toFixed(1) + " " + yN(0) + " L" + pts[0][0].toFixed(1) + " " + yN(0) + " Z", class: "wash"}));
+    svg.appendChild(svgEl("path", {d, class: "series"}));
+  }
+  pts.forEach(p => svg.appendChild(svgEl("circle", {cx: p[0], cy: p[1], r: 4, class: "dot" + (chart.no2.get(p[2]).is_flagged ? " flag" : "")})));
+  if (pts.length) { const last = pts[pts.length - 1]; svg.appendChild(svgEl("text", {x: last[0] + 8, y: last[1] + 4, class: "lbl"}, num(chart.no2.get(last[2]).value, 1))); }
+  const colW = Math.min(24, hourW - 4);
+  chart.hours.forEach(t => {
+    const p = chart.traffic.get(t);
+    if (!p) return;
+    const h = Math.max(0, yT(0) - yT(p.total_intensity_veh_per_hr));
+    svg.appendChild(svgEl("path", {class: "col", "data-t": t, d: roundedColumn(x(t) - colW / 2, yT(0) - h, colW, h, 4)}));
+  });
+  svg.appendChild(svgEl("line", {x1: 0, x2: 0, y1: NO2_Y.top, y2: TR_Y.top + TR_Y.h, class: "hair", id: "hair"}));
+  svg.appendChild(svgEl("rect", {x: PAD.l, y: NO2_Y.top, width: innerW, height: TR_Y.top + TR_Y.h - NO2_Y.top, class: "hit", id: "hit"}));
+  chart.x = x; chart.innerW = innerW; chart.hourW = hourW;
+
+  const rows = $("hist-rows");
+  rows.replaceChildren();
+  chart.hours.forEach(t => {
+    const n = chart.no2.get(t), tr = chart.traffic.get(t);
+    if (!n && !tr) return;
+    const row = el("tr");
+    row.appendChild(el("td", {}, windowText(new Date(t).toISOString())));
+    row.appendChild(el("td", {class: "num"}, n ? num(n.value, 1) + (n.is_flagged ? " (flagged)" : "") : "n/a"));
+    row.appendChild(el("td", {class: "num"}, tr ? num(tr.total_intensity_veh_per_hr, 0) : "n/a"));
+    rows.appendChild(row);
+  });
+  if (!chart.no2.size && !chart.traffic.size) svg.appendChild(svgEl("text", {x: W / 2, y: 200, "text-anchor": "middle", class: "lbl"}, "No readings in the last 24 hours"));
+  showIndex(-1);
+}
+
+function roundedColumn(x, y, w, h, r) {
+  if (h <= r) return "M" + x + " " + (y + h) + " h" + w + " v" + (-h) + " h" + (-w) + " Z";
+  return "M" + x + " " + (y + h) + " v" + (-(h - r)) + " a" + r + " " + r + " 0 0 1 " + r + " " + (-r) + " h" + (w - 2 * r)
+    + " a" + r + " " + r + " 0 0 1 " + r + " " + r + " v" + (h - r) + " Z";
+}
+
+function showIndex(i) {
+  chart.idx = i;
+  const box = $("chart"), tip = $("tip"), hair = $("hair");
+  document.querySelectorAll("#svg .col").forEach(c => c.classList.remove("hot"));
+  if (i < 0 || i >= chart.hours.length) { box.classList.remove("active"); tip.classList.remove("show"); return; }
+  const t = chart.hours[i], px = chart.x(t);
+  hair.setAttribute("x1", px); hair.setAttribute("x2", px);
+  box.classList.add("active");
+  const col = document.querySelector('#svg .col[data-t="' + t + '"]');
+  if (col) col.classList.add("hot");
+  const n = chart.no2.get(t), tr = chart.traffic.get(t);
+  tip.replaceChildren(el("div", {class: "t"}, windowText(new Date(t).toISOString()) + " local"));
+  const r1 = el("div", {class: "row"}); r1.appendChild(el("span", {}, "")); r1.firstChild.appendChild(el("i", {style: "background:var(--blue)"})); r1.firstChild.appendChild(document.createTextNode("NO2"));
+  r1.appendChild(el("b", {}, n ? num(n.value, 1) + " \u00b5g/m\u00b3" + (n.is_flagged ? " (flagged)" : "") : "no reading")); tip.appendChild(r1);
+  const r2 = el("div", {class: "row"}); r2.appendChild(el("span", {}, "")); r2.firstChild.appendChild(el("i", {style: "background:var(--orange)"})); r2.firstChild.appendChild(document.createTextNode("Traffic"));
+  r2.appendChild(el("b", {}, tr ? num(tr.total_intensity_veh_per_hr, 0) + " veh/h" : "no full hour")); tip.appendChild(r2);
+  // The svg can be wider than its scrolling wrapper on a phone, so measure the svg itself.
+  const svgRect = $("svg").getBoundingClientRect(), boxRect = box.getBoundingClientRect(), scale = svgRect.width / W;
+  const left = Math.min(Math.max(8, svgRect.left - boxRect.left + px * scale + 14), boxRect.width - tip.offsetWidth - 8);
+  tip.style.left = left + "px"; tip.style.top = (NO2_Y.top * scale) + "px";
+  tip.classList.add("show");
+}
+
+function wireChart() {
+  const box = $("chart");
+  box.addEventListener("pointermove", e => {
+    if (!chart.hours.length) return;
+    const rect = $("svg").getBoundingClientRect(), vx = (e.clientX - rect.left) / rect.width * W;
+    const i = Math.round((vx - PAD.l) / chart.hourW - 0.5);
+    showIndex(Math.max(0, Math.min(chart.hours.length - 1, i)));
+  });
+  box.addEventListener("pointerleave", () => showIndex(-1));
+  box.addEventListener("keydown", e => {
+    if (!chart.hours.length) return;
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      e.preventDefault();
+      const cur = chart.idx < 0 ? chart.hours.length - 1 : chart.idx;
+      showIndex(Math.max(0, Math.min(chart.hours.length - 1, cur + (e.key === "ArrowRight" ? 1 : -1))));
+    } else if (e.key === "Escape") showIndex(-1);
+  });
+  box.addEventListener("blur", () => showIndex(-1));
+}
+
+async function refresh() {
+  const [sites, health, history] = await Promise.all([
+    Promise.allSettled(SITES.map(fetchSite)),
+    fetchJson("/health", "health").catch(() => null),
+    fetchJson("/history?hours=24", "history").catch(e => ({error: e.message})),
+  ]);
+  const data = {};
+  $("banners").replaceChildren();
+  sites.forEach((r, i) => { if (r.status === "fulfilled") data[SITES[i]] = r.value; else banner("Could not load " + r.reason.message, "err"); });
+  renderHealth(health);
+  renderKpis(data);
+  if (history && !history.error) renderHistory(history); else banner("Could not load the 24-hour history" + (history && history.error ? ": " + history.error : ""), "err");
+  $("updated").textContent = "Updated " + clock(new Date().toISOString()) + " (Europe/Amsterdam). Refreshes every 60 s.";
 }
 
 let busy = false;
@@ -515,6 +833,7 @@ async function tick() {
   try { await refresh(); } finally { busy = false; }
 }
 
+wireChart();
 tick();
 setInterval(tick, 60000);
 </script>

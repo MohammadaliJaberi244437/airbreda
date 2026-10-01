@@ -14,6 +14,19 @@
   }
   /* On a phone, scroll the diagram sideways instead of shrinking it to unreadable size. */
   pre.mermaid svg { min-width: 900px; }
+  /* Print: the theme's 16 px body font and the full-viewport diagram would make the
+     document about 14 pages; this brings it to the 6 to 8 page target without cutting text. */
+  @media print {
+    @page { margin: 15mm; }
+    body { font-size: 11pt; line-height: 1.3; }
+    .wrapper { max-width: none; }
+    pre.mermaid { width: 100%; max-width: 100%; left: auto; transform: none; overflow: visible; }
+    pre.mermaid svg { min-width: 0; max-width: 100%; height: auto; }
+    img { max-height: 90mm; }
+    header .view, footer { display: none; }
+    h1, h2, h3 { page-break-after: avoid; }
+    table, pre { page-break-inside: avoid; }
+  }
 </style>
 <script type="module">
   import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';

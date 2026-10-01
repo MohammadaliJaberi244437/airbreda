@@ -28,7 +28,20 @@ while ($true) {
 }
 
 Write-Host "Setting the password on the database..."
-& $aws rds modify-db-instance --db-instance-identifier airbreda-db --master-user-password $pw --apply-immediately --query "DBInstance.DBInstanceIdentifier" --output text | Out-Null
+# The password reaches the AWS CLI through a temporary JSON file that only this user can
+# read, never as a command-line argument: while aws.exe runs, its command line is visible to
+# every local process (Task Manager, Get-Process, process-creation auditing).
+$inputFile = Join-Path $env:TEMP ("airbreda-rds-" + [guid]::NewGuid().ToString("N") + ".json")
+$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+try {
+    New-Item -ItemType File -Path $inputFile | Out-Null
+    icacls $inputFile /inheritance:r /grant:r "${me}:(R,W)" | Out-Null
+    @{ DBInstanceIdentifier = 'airbreda-db'; MasterUserPassword = $pw; ApplyImmediately = $true } |
+        ConvertTo-Json -Compress | Set-Content -Encoding ascii -NoNewline $inputFile
+    & $aws rds modify-db-instance --cli-input-json "file://$inputFile" --query "DBInstance.DBInstanceIdentifier" --output text | Out-Null
+} finally {
+    Remove-Item $inputFile -Force -ErrorAction SilentlyContinue
+}
 
 @"
 DB_HOST=$endpoint

@@ -3,12 +3,32 @@ import logging
 
 import pandas as pd
 
-from ingest_air import flag_bad_readings, to_db_rows
+from ingest_air import STALE_RUN, UPSERT_SQL, flag_bad_readings, to_db_rows
 from ingest_traffic import SITES, SiteReading, build_traffic_rows, csv_key, merge_csv, parse_sites
 
 
 def _events(caplog, name):
     return [r.getMessage() for r in caplog.records if f'"event": "{name}"' in r.getMessage()]
+
+
+def _page(first_hour, values):
+    """A Luchtmeetnet page, newest first: hour offsets from 2026-09-20T00:00Z."""
+    hours = list(range(first_hour, first_hour + len(values)))[::-1]
+    return pd.DataFrame({
+        "component": ["NO2"] * len(values),
+        "value": list(values)[::-1],
+        "timestamp": [(pd.Timestamp("2026-09-20T00:00:00Z") + pd.Timedelta(hours=h)).isoformat()
+                      for h in hours],
+    })
+
+
+def _upsert(old, new):
+    """Python mirror of UPSERT_SQL's DO UPDATE: a revised value takes the fresh flag, an
+    unchanged value keeps a flag it already has (IS DISTINCT FROM treats NULL = NULL)."""
+    if old is None:
+        return new
+    (old_value, old_flag), (value, flag) = old, new
+    return (value, flag if old_value != value else (old_flag or flag))
 
 
 # (a) Luchtmeetnet: stale or null readings are written, flagged, never dropped.
@@ -41,6 +61,48 @@ def test_repeated_value_across_a_gap_is_not_stale():
     })
     flagged, bad_count = flag_bad_readings(df)
     assert bad_count == 0 and not flagged["is_flagged"].any()
+
+
+def test_stale_flags_survive_the_page_edge_through_the_sticky_upsert():
+    # Hours 0, 1, 2 are frozen at 30.0. Each hourly run re-fetches the newest 50 hours, so
+    # one hour later the oldest frozen hour is off the page and the remaining two no longer
+    # form a run of STALE_RUN: judged by that page alone they are unflagged.
+    frozen = [30.0] * STALE_RUN
+    values = lambda start: [30.0 if h < STALE_RUN else 20.0 + h % 7 for h in range(start, start + 50)]  # noqa: E731
+    pages = [flag_bad_readings(_page(start, values(start)))[0] for start in range(STALE_RUN)]
+    flags_by_page = [[bool(f) for f in p.loc[p["value"] == 30.0, "is_flagged"]] for p in pages]
+    assert flags_by_page == [[True] * 3, [False] * 2, [False]]
+
+    # UPSERT_SQL keeps the flag while the value is unchanged, so after the three runs every
+    # frozen hour is still flagged; a later revision of the value would get a fresh flag.
+    table = {}
+    for page in pages:
+        for _, ts, _, value, flag in to_db_rows(page):
+            table[ts] = _upsert(table.get(ts), (value, flag))
+    assert [table[ts] for ts in sorted(table) if table[ts][0] == 30.0] == [(30.0, True)] * len(frozen)
+    assert _upsert((30.0, True), (31.5, False)) == (31.5, False)
+    assert _upsert((None, True), (None, True)) == (None, True)
+    assert "IS DISTINCT FROM EXCLUDED.value" in UPSERT_SQL
+    assert "sensor_readings.is_flagged OR EXCLUDED.is_flagged" in UPSERT_SQL
+
+
+def test_only_readings_newer_than_the_previous_run_are_counted(caplog):
+    # An 11-hour null outage at hours 5 to 15 stays inside the 50-hour page for two days.
+    # Every row is still written with its flag, but the count (ingestion_runs.bad_data_count,
+    # /health, BAD_DATA_THRESHOLD_EXCEEDED) covers only the hours new to this run.
+    values = [None if 5 <= h <= 15 else 20.0 + h % 7 for h in range(50)]
+    previous_last = pd.Timestamp("2026-09-20T00:00:00Z") + pd.Timedelta(hours=48)
+    with caplog.at_level(logging.WARNING):
+        flagged, bad_count = flag_bad_readings(_page(0, values), since=previous_last.to_pydatetime())
+    assert int(flagged["is_flagged"].sum()) == 11 and bad_count == 0
+    assert _events(caplog, "DATA_QUALITY_ERROR") == []
+
+    values[49] = None  # the hour that is new to this run is null
+    with caplog.at_level(logging.WARNING):
+        flagged, bad_count = flag_bad_readings(_page(0, values), since=previous_last)
+    assert int(flagged["is_flagged"].sum()) == 12 and bad_count == 1
+    assert len(_events(caplog, "DATA_QUALITY_ERROR")) == 1
+    assert flag_bad_readings(_page(0, values))[1] == 12  # first run or dry-run: the whole page
 
 
 # (b) NDW: a -1 lane speed means no speed row, but the intensity row stays.

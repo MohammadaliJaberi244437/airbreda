@@ -130,6 +130,19 @@ def record_run(conn, source, success, last_measurement, rows_written, bad_data_c
         )
 
 
+def last_successful_measurement(conn, source):
+    """last_measurement of the newest successful run of `source`; None on the first run
+    and in dry-run. Lets a job tell the readings new to this run from the ones it re-fetches."""
+    if conn is None:
+        return None
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT MAX(last_measurement) FROM ingestion_runs WHERE source = %s AND success",
+            (source,),
+        )
+        return cur.fetchone()[0]
+
+
 def recent_bad_count(conn, source):
     """Bad readings recorded for `source` over the last hour (0 in dry-run)."""
     if conn is None:

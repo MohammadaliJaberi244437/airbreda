@@ -15,9 +15,9 @@ All on AWS, Region eu-north-1 (Stockholm):
 - **EC2 t3.micro** (Amazon Linux 2023) runs three Docker images. cron starts two run-and-exit ingestion jobs: `airbreda-air` hourly at :25 UTC and `airbreda-traffic` every 10 minutes. `airbreda-dashboard` (FastAPI) runs all the time with `--restart unless-stopped`; the trained model is baked into the image.
 - **RDS PostgreSQL 18** (db.t4g.micro): `sensor_readings` (primary key station_id, timestamp, component) and `ingestion_runs` (one row per job run, used by `/health`).
 - **S3** bucket: `raw/ndw/` holds every raw NDW feed, uploaded before parsing; `ndw/YYYY-MM-DD/HH-{site}.csv` holds one CSV per site per hour.
-- **Access:** the VM uses instance role `airbreda-ec2-role` (ListBucket, GetObject and PutObject on this bucket only, no keys on the VM). Security groups allow SSH and the dashboard port 8000 only from the developer IP (public access to the dashboard needs an extra inbound rule, 8000 from 0.0.0.0/0), and PostgreSQL only from the VM's security group and the developer IP. The bucket has Block Public Access on and no bucket policy.
+- **Access:** the VM uses instance role `airbreda-ec2-role` (ListBucket, GetObject and PutObject on this bucket only, no keys on the VM). Security groups allow SSH only from the developer IP and the dashboard port 8000 from anywhere (0.0.0.0/0, added so graders can reach it), and PostgreSQL only from the VM's security group and the developer IP. The bucket has Block Public Access on and no bucket policy.
 
-Data quality: Luchtmeetnet values that are null or stuck for 3 or more hours are kept with `is_flagged = TRUE`. NDW speed `-1` and lanes marked `dataError` are logged as `DATA_QUALITY_ERROR` and the speed row is not stored. Each run records its bad-data count in `ingestion_runs`.
+Data quality: Luchtmeetnet values that are null or stuck for 3 or more hours are kept with `is_flagged = TRUE`; the flag survives the hourly re-fetch of the 50-hour page (an unchanged value keeps its flag, a revised value gets a fresh one). NDW speed `-1` and lanes marked `dataError` are logged as `DATA_QUALITY_ERROR` and the speed row is not stored. Each run records in `ingestion_runs` the bad readings new to that run (not the whole re-fetched page).
 
 ## Endpoints (port 8000)
 
@@ -60,20 +60,28 @@ python train_model.py
 
 ## Deploy to the VM
 
-Launch Amazon Linux 2023 with `infra/user-data.sh` (it installs Docker, cronie, git and the psql client and adds swap) and the instance profile `airbreda-ec2-profile` (role `airbreda-ec2-role`). Then on the VM:
+Launch Amazon Linux 2023 with `infra/user-data.sh` (it installs Docker, cronie, git and the psql client and adds swap) and the instance profile `airbreda-ec2-profile` (role `airbreda-ec2-role`). The VM holds no git clone: the files it needs are copied from the laptop with `scp` over SSH (the path `tools/retrain_and_deploy.ps1` also uses for the dashboard) and the VM builds the three images itself. From the repository root on the laptop (`$VM` = `ec2-user@13.61.230.95`, key `~/.ssh/airbreda-key.pem`):
 
 ```
-git clone <repo> ~/airbreda && cd ~/airbreda
+ssh -i ~/.ssh/airbreda-key.pem $VM "mkdir -p ~/airbreda/logs"
+scp -i ~/.ssh/airbreda-key.pem common.py broker.py features.py predict.py ingest_air.py ingest_traffic.py dashboard.py \
+    model.pkl model_meta.json schema.sql Dockerfile Dockerfile.traffic Dockerfile.dashboard \
+    requirements-ingest.txt requirements-dashboard.txt .dockerignore infra/crontab.txt $VM:~/airbreda/
+```
+
+Then on the VM:
+
+```
+cd ~/airbreda
 # create .env, then create the tables once: psql ... -f schema.sql
-mkdir -p logs
 docker build -t airbreda-air -f Dockerfile .
 docker build -t airbreda-traffic -f Dockerfile.traffic .
 docker build -t airbreda-dashboard -f Dockerfile.dashboard .
-crontab infra/crontab.txt
-docker run -d --name dashboard --restart unless-stopped --env-file .env -p 8000:8000 airbreda-dashboard
+crontab ~/airbreda/crontab.txt
+docker run -d --name dashboard --restart unless-stopped --env-file .env -p 8000:8000 --memory 450m airbreda-dashboard
 ```
 
-Job logs are JSON lines (one JSON object per line) in `~/airbreda/logs/air.log` and `~/airbreda/logs/traffic.log`; the dashboard's request log, with status and duration per request, is in `docker logs dashboard`.
+The dashboard is capped at 450 MiB so a leak in it cannot starve the ingestion containers of the VM's 1 GiB. Job logs are JSON lines (one JSON object per line) in `~/airbreda/logs/air.log` and `~/airbreda/logs/traffic.log`; the dashboard's request log, with status and duration per request, is in `docker logs dashboard`. One exception on the current VM: line 2 of `air.log` is a plain-text line from the first cron run at 10:25 UTC on 1 October, written by an image built before that `print` was removed (10:44 UTC); every later line is JSON.
 
 ## Repository layout
 
@@ -94,7 +102,10 @@ Dockerfile.dashboard       dashboard image
 docker-compose.yml         local test of all three services
 docker-compose.redis.yml   Redis messaging prototype
 infra/                     EC2 user data, crontab, IAM policy and trust documents
-tools/                     capture_ndw.py (bootstrap capture), compose-up.ps1
+tools/                     capture_ndw.py (bootstrap capture), compose-up.ps1 (local Compose test),
+                           fill_model_numbers.py (writes model_meta.json numbers into docs/index.md between
+                           <!--KEY--> markers), retrain_and_deploy.ps1 (rebuild training data, retrain, test,
+                           update the document, redeploy the dashboard on the VM, push)
 tests/                     pytest suite
 docs/                      GitHub Pages site with the Architecture Design Document
 ```
