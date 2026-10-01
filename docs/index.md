@@ -229,6 +229,8 @@ Starting the NDW capture at 10:33, before any cloud resource existed, was the be
 
 ## 7. Appendix {#appendix}
 
+**Lab notebook:** every reflection, estimation and wrap-up question of the five days, answered from the real system and live API calls: [notebook](notebook/).
+
 **Endpoints, how to run and how to deploy:** see the repository's README ([https://github.com/MohammadaliJaberi244437/airbreda](https://github.com/MohammadaliJaberi244437/airbreda)).
 
 **Evidence:** [Redis lab output](evidence/redis_lrange.txt) (`LLEN readings` = 58); [the three speed `-1` samples](evidence/ndw_speed_minus1.txt) with their `ingestion_runs` rows; [all cost calculations](evidence/cost_model.py); the [training data plot](img/no2_vs_intensity.png); on the VM, `~/airbreda/logs/air.log` and `traffic.log` (one JSON object per line), the dashboard's request log (`docker logs`) and the `ingestion_runs` table.
