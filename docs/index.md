@@ -33,7 +33,7 @@ flowchart LR
   end
   subgraph AWS["AWS account, Region eu-north-1 Stockholm"]
     subgraph VPC["VPC, AZ eu-north-1a"]
-      subgraph VMSG["SG airbreda-vm-sg: 22 and 8000 from dev IP only"]
+      subgraph VMSG["SG airbreda-vm-sg: 22 from dev IP only, 8000 from anyone"]
         subgraph ROLE["EC2 airbreda-vm t3.micro, role airbreda-ec2-role: S3 List, Get, Put on this bucket only"]
           CRON["cron, UTC"]
           AIR["airbreda-air<br/>hourly at :25"]
@@ -63,17 +63,17 @@ flowchart LR
   TRAIN -.->|"read"| RDS
   TRAIN -.->|"read"| S3
   TRAIN -.->|"commit model.pkl"| GH
-  GH -.->|"git clone, docker build on VM"| DASH
+  TRAIN -.->|"scp over SSH, docker build on VM"| DASH
 </pre>
 
 **Trust boundaries** (SG = security group, dev IP = my developer IP):
 
-- **airbreda-vm-sg:** SSH (22) and the dashboard (8000) only from my developer IP, as deployed. Public grading access needs one more rule: 8000 from 0.0.0.0/0 (plain HTTP, read-only page).
+- **airbreda-vm-sg:** SSH (22) only from my developer IP. The dashboard (8000) is open to 0.0.0.0/0 so the grader can reach it; it is plain HTTP and read-only, with no write endpoints.
 - **airbreda-db-sg:** 5432 only from members of airbreda-vm-sg (a group reference, which survives a VM IP change) and from my IP; TLS required.
 - **airbreda-ec2-role:** s3:ListBucket on the bucket, s3:GetObject and s3:PutObject on its objects; no delete, no other service. Containers get short-lived credentials through IMDSv2 (hop limit 2); no keys on the VM.
 - **S3 bucket:** Block Public Access on, no bucket policy: only the VM role and my laptop session reach it.
 - **Laptop:** `aws login` gives short-lived credentials for AccountFullAccessRole, full account access and the widest trust in the system (setup, backfill, Compose test). No long-lived access keys exist; the database password lives only in git- and docker-ignored `.env` files.
-- **Code path:** code and `model.pkl` go to GitHub; the VM runs `git clone` and builds all three images itself. With no registry, whoever can push to the repository decides what the VM runs next.
+- **Code path:** code and `model.pkl` are committed to GitHub and copied from my laptop to the VM with `scp` over SSH; the VM builds all three images itself. With no registry or pipeline, whoever holds the SSH key decides what the VM runs next, which is why CI/CD is the first production addition in my reflection.
 
 ## 2. Architecture Decision Records {#adrs}
 
