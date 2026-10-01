@@ -8,3 +8,5 @@ __pycache__/
 *.pyc
 .pytest_cache/
 PRESENTATION_GUIDE.md
+STUDY_GUIDE.md
+DEMO_SCRIPT.md
