@@ -157,7 +157,7 @@ flowchart LR
 
 ### ADR-006: ML Serving Architecture {#adr-006}
 
-**Status:** Accepted for the prototype; numbers from the final training at <!--TRAINED_AT-->10:48 on 2 October 2026 (Amsterdam time)<!--/TRAINED_AT-->.
+**Status:** Accepted for the prototype; numbers from the final training at <!--TRAINED_AT-->11:01 on 2 October 2026 (Amsterdam time)<!--/TRAINED_AT-->.
 
 **Context.** Target: hourly NO2 at NL10240. Features: total A27 intensity (hourly mean of the 10-minute samples, summed over four sites) and local hour of day. Training data: <!--N_ROWS-->23<!--/N_ROWS--> hourly rows (<!--TRAIN_RANGE-->hours ending 1 October 2026 10:00 UTC to 2 October 2026 08:00 UTC<!--/TRAIN_RANGE-->). Flagged hours are excluded, as are hours in which any site has fewer than 3 samples spanning 30 minutes (the coverage rule the dashboard applies too) and hours without published NO2.
 
